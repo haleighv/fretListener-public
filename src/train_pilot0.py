@@ -1,5 +1,6 @@
 # src/train_pilot0.py
 
+import csv
 from pathlib import Path
 from typing import Dict
 
@@ -17,17 +18,6 @@ def select_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
-
-
-def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
-    """
-    logits: [B, C]
-    targets: [B]
-    """
-    preds = logits.argmax(dim=1)
-    correct = (preds == targets).sum().item()
-    total = targets.size(0)
-    return correct / total if total > 0 else 0.0
 
 
 def train_one_epoch(
@@ -226,6 +216,9 @@ def main():
 
     num_epochs = 20
 
+    # Per-epoch history for plotting later
+    history = []
+
     for epoch in range(1, num_epochs + 1):
         train_metrics = train_one_epoch(
             model,
@@ -259,6 +252,37 @@ def main():
             f"val_acc_all={val_metrics['acc_all']:.3f}"
         )
 
+        # Log to history
+        history.append({
+            "epoch": epoch,
+            "split": "train",
+            "loss": train_metrics["loss"],
+            "acc_note": train_metrics["acc_note"],
+            "acc_string": train_metrics["acc_string"],
+            "acc_fret": train_metrics["acc_fret"],
+            "acc_all": train_metrics["acc_all"],
+        })
+        history.append({
+            "epoch": epoch,
+            "split": "val",
+            "loss": val_metrics["loss"],
+            "acc_note": val_metrics["acc_note"],
+            "acc_string": val_metrics["acc_string"],
+            "acc_fret": val_metrics["acc_fret"],
+            "acc_all": val_metrics["acc_all"],
+        })
+
+    # Save training/validation history next to this script
+    script_dir = Path(__file__).resolve().parent
+    history_path = script_dir / "pilot0_training_history.csv"
+    fieldnames = ["epoch", "split", "loss", "acc_note", "acc_string", "acc_fret", "acc_all"]
+    with history_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in history:
+            writer.writerow(row)
+    print(f"Saved training history to {history_path}")
+
     # Final test evaluation
     test_metrics = evaluate(
         model,
@@ -277,8 +301,8 @@ def main():
         f"acc_all={test_metrics['acc_all']:.3f}"
     )
 
-    # Optional: save checkpoint
-    ckpt_path = Path("pilot0_multihead_cnn.pt")
+    # Save checkpoint next to this script
+    ckpt_path = script_dir / "pilot0_multihead_cnn.pt"
     torch.save(
         {
             "model_state_dict": model.state_dict(),

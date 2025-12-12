@@ -6,23 +6,26 @@ from pathlib import Path
 import csv
 import random
 
-
-'''
+"""
 Example usage:
-python tools/build_training_mix.py \
-  --datasets data/strat_neck_40 \
-  --max-per-class 40 \
-  --train-ratio 0.8 \
-  --output data/training_mix_neck.csv
 
-multiple datasets:
+Use all data from both datasets (no per-class cap):
+python tools/build_training_mix.py \
+  --datasets data/strat_neck_40 data/strat_neck_119 \
+  --train-ratio 0.8 \
+  --output data/training_mix_neck_40_119_all.csv \
+  --seed 42
+
+Cap at 40 samples per pos from the given datasets:
 python tools/build_training_mix.py \
   --datasets data/strat_neck_40 data/strat_bridge_40 \
   --max-per-class 40 \
   --train-ratio 0.8 \
-  --output data/training_mix_neck_bridge.csv
+  --output data/training_mix_neck_bridge_40.csv \
+  --seed 42
+"""
 
-'''
+
 def prompt_path_list(prompt: str) -> list[Path]:
     print(prompt)
     print("Enter one dataset root per line (blank line to finish).")
@@ -39,10 +42,15 @@ def prompt_path_list(prompt: str) -> list[Path]:
     return roots
 
 
-def prompt_int(prompt: str, default: int | None = None) -> int:
+def prompt_int(prompt: str, default: int | None = None) -> int | None:
+    """
+    Prompt for an integer. If default is not None and user enters blank,
+    return default. If default is None and user enters blank, return None.
+    """
     while True:
         value = input(prompt).strip()
-        if not value and default is not None:
+        if not value:
+            # Allow "no cap" semantics when default is None
             return default
         try:
             return int(value)
@@ -120,7 +128,7 @@ def build_training_mix(
                 except Exception:
                     pass
 
-            # Normalize pos
+            # Normalize pos (required)
             try:
                 row_copy["pos"] = int(row_copy["pos"])
             except Exception:
@@ -136,6 +144,7 @@ def build_training_mix(
             else:
                 row_copy["take"] = -1
 
+            # Dataset root name, etc.
             row_copy["dataset_root"] = str(root)
 
             # abs_path to audio file
@@ -169,7 +178,7 @@ def build_training_mix(
         selected.extend(rows_copy)
         print(
             f"Class pos={pos}: using {len(rows_copy)} / {len(rows)} samples "
-            f"from {len({r['dataset_name'] for r in rows})} dataset(s)"
+            f"from {len({r.get('dataset_name', '') for r in rows})} dataset(s)"
         )
 
     if not selected:
@@ -226,7 +235,6 @@ def build_training_mix(
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in final_rows:
-            # Ensure only known fields are written
             out_row = {k: row.get(k, "") for k in fieldnames}
             writer.writerow(out_row)
 
@@ -244,13 +252,19 @@ def main():
     parser.add_argument(
         "--datasets",
         nargs="*",
-        help="Dataset roots (e.g. data/strat_neck_40 data/strat_bridge_40). "
-             "If omitted, will prompt interactively.",
+        help=(
+            "Dataset roots (e.g. data/strat_neck_40 data/strat_bridge_40). "
+            "If omitted, script will prompt interactively."
+        ),
     )
     parser.add_argument(
         "--max-per-class",
         type=int,
-        help="Optional cap on samples per position class (pos). Default: no cap.",
+        help=(
+            "Optional cap on samples per position class (pos). "
+            "If omitted and --datasets is provided, all available samples "
+            "for each class are used (no cap)."
+        ),
     )
     parser.add_argument(
         "--train-ratio",
@@ -272,6 +286,7 @@ def main():
     )
     args = parser.parse_args()
 
+    # Dataset roots: CLI or interactive
     if args.datasets:
         dataset_roots = [Path(p).expanduser() for p in args.datasets]
     else:
@@ -286,13 +301,20 @@ def main():
         if not r.exists():
             raise SystemExit(f"Dataset root does not exist: {r}")
 
+    # Max per class semantics:
+    # - If CLI provided --max-per-class, use that.
+    # - Else if CLI provided --datasets, default to "no cap" (None) and do NOT prompt.
+    # - Else (fully interactive run), prompt the user.
     if args.max_per_class is not None:
         max_per_class = args.max_per_class
     else:
-        max_per_class = prompt_int(
-            "Max samples per class (pos)? [blank for no cap]: ",
-            default=None,
-        )
+        if args.datasets:
+            max_per_class = None  # no cap, non-interactive
+        else:
+            max_per_class = prompt_int(
+                "Max samples per class (pos)? [blank for no cap]: ",
+                default=None,
+            )
 
     if args.train_ratio is not None:
         train_ratio = args.train_ratio

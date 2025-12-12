@@ -26,7 +26,7 @@ Example usage:
 cd ~/code/fretListener
 
 python src/train_note_model.py \
-  --mix-csv data/training_mix.csv \
+  --mix-csv data/training_mix_neck.csv \
   --batch-size 64 \
   --epochs 30
 
@@ -65,14 +65,15 @@ class NoteDatasetFromMix(Dataset):
         rows: List[dict],
         midi_to_idx: Dict[int, int],
         sample_rate: int = 48000,
-        attack_duration: float = 0.19,
+        attack_duration: float = 0.25,
         n_fft: int = 1024,
         hop_length: int = 256,
-        n_mels: int = 64,
+        n_mels: int = 48,
         f_min: float = 55.0,
-        f_max: float = 2000.0,
+        f_max: float = 3000.0,
         num_frames: int = 32,
         device: Optional[torch.device] = None,
+        augment: bool = False,
     ) -> None:
         super().__init__()
 
@@ -81,6 +82,7 @@ class NoteDatasetFromMix(Dataset):
         self.sample_rate = sample_rate
         self.attack_samples = int(round(sample_rate * attack_duration))
         self.num_frames = num_frames
+        self.augment = augment  # currently unused (augmentation disabled)
 
         # Audio transforms
         self.mel_spec = torchaudio.transforms.MelSpectrogram(
@@ -128,6 +130,35 @@ class NoteDatasetFromMix(Dataset):
 
         return wav
 
+    def _augment_waveform(self, wav: torch.Tensor) -> torch.Tensor:
+        """
+        (Currently unused) Light augmentation that preserves pitch:
+          - small gain jitter
+          - low-level additive noise
+          - tiny time shift within the attack window
+        """
+        # Small gain jitter: +/- ~1 dB
+        gain_db = np.random.uniform(-1.0, 1.0)
+        gain = 10.0 ** (gain_db / 20.0)
+        wav = wav * float(gain)
+
+        # Add low-level noise relative to signal max
+        max_val = wav.abs().max().item()
+        if max_val > 0:
+            noise_std = 0.005 * max_val
+            noise = torch.randn_like(wav) * noise_std
+            wav = wav + noise
+
+        # Tiny time shift: up to ~2 ms
+        max_shift_sec = 0.002
+        max_shift_samples = int(self.sample_rate * max_shift_sec)
+        if max_shift_samples > 0:
+            shift = np.random.randint(-max_shift_samples, max_shift_samples + 1)
+            if shift != 0:
+                wav = torch.roll(wav, shifts=shift, dims=1)
+
+        return wav
+
     def _waveform_to_logmel(self, wav: torch.Tensor) -> torch.Tensor:
         """
         Convert [1, T] waveform to [1, n_mels, num_frames] log-mel tensor.
@@ -137,6 +168,12 @@ class NoteDatasetFromMix(Dataset):
 
         spec = self.mel_spec(wav)         # [1, n_mels, T_spec]
         spec_db = self.db_transform(spec) # [1, n_mels, T_spec]
+
+        # Per-sample normalization over time
+        # mean/std over time dimension (dim=2), keep frequency structure
+        mean = spec_db.mean(dim=2, keepdim=True)
+        std = spec_db.std(dim=2, keepdim=True) + 1e-6
+        spec_db = (spec_db - mean) / std
 
         _, n_mels, T = spec_db.shape
         if T < self.num_frames:
@@ -154,6 +191,11 @@ class NoteDatasetFromMix(Dataset):
         label = self.midi_to_idx[midi]
 
         wav = self._load_audio(abs_path)
+
+        # Augmentation disabled for now, even if self.augment is True
+        # if self.augment:
+        #     wav = self._augment_waveform(wav)
+
         spec = self._waveform_to_logmel(wav)
 
         return spec.cpu(), int(label)
@@ -367,7 +409,6 @@ def create_run_dir(model_type: str = "note") -> Path:
     return run_dir
 
 
-
 def plot_training_curves(
     history: Dict[str, List[float]],
     run_dir: Path,
@@ -404,7 +445,7 @@ def plot_training_curves(
 def export_onnx_model(
     model: nn.Module,
     run_dir: Path,
-    num_mels: int = 64,
+    num_mels: int = 48,
     num_frames: int = 32,
 ) -> None:
     """
@@ -543,9 +584,17 @@ def main():
     print(f"Unique MIDI notes: {num_classes}")
     print("MIDI classes:", sorted(midi_to_idx.keys()))
 
-    # Datasets
-    train_ds = NoteDatasetFromMix(train_rows, midi_to_idx)
-    val_ds = NoteDatasetFromMix(val_rows, midi_to_idx)
+    # Datasets (augmentation currently disabled even for train)
+    train_ds = NoteDatasetFromMix(
+        train_rows,
+        midi_to_idx,
+        augment=False,
+    )
+    val_ds = NoteDatasetFromMix(
+        val_rows,
+        midi_to_idx,
+        augment=False,
+    )
 
     train_loader = DataLoader(
         train_ds,
@@ -563,9 +612,18 @@ def main():
     )
 
     # Model and training setup
-    model = NoteCNN(num_classes=num_classes).to(device)
-    criterion = nn.CrossEntropyLoss()
+    model = NoteCNN(num_classes=num_classes, n_mels=48, dropout_p=0.3).to(device)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    # LR scheduler on validation accuracy
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=0.1,
+        patience=5,
+        verbose=True,
+    )
 
     history = {
         "train_loss": [],
@@ -597,6 +655,9 @@ def main():
             f"Val loss {val_loss:.4f}, acc {val_acc:.4f}"
         )
 
+        # Step LR scheduler on validation accuracy
+        scheduler.step(val_acc)
+
         # Track best by validation accuracy (tie-breaker: lower loss)
         is_better = (val_acc > best_val_acc) or (
             val_acc == best_val_acc and val_loss < best_val_loss
@@ -615,9 +676,9 @@ def main():
                 "mel_params": {
                     "n_fft": 1024,
                     "hop_length": 256,
-                    "n_mels": 64,
+                    "n_mels": 48,
                     "f_min": 55.0,
-                    "f_max": 2000.0,
+                    "f_max": 3000.0,
                     "num_frames": train_ds.num_frames,
                 },
             }
@@ -644,7 +705,7 @@ def main():
     export_onnx_model(
         model,
         run_dir,
-        num_mels=64,
+        num_mels=48,
         num_frames=train_ds.num_frames,
     )
 

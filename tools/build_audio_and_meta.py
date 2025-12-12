@@ -9,6 +9,19 @@ import re
 
 import soundfile as sf
 
+'''
+Example usage:
+cd ~/code/fretListener
+
+python tools/build_audio_and_meta.py \
+    --organized-dir data/strat_neck_40/organized \
+    --samples-per-class 40
+
+
+python tools/build_audio_and_meta.py \
+    --organized-dir data/strat_neck_119/organized \
+    --samples-per-class 119
+'''
 
 # ---------- helpers ----------
 

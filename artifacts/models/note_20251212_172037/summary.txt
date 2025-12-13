@@ -1,0 +1,70 @@
+Note CNN Training Summary
+=========================
+
+Run directory: artifacts/models/note_20251212_172037
+Mix CSV:       data/training_mix_neck.csv
+Device:        mps
+Seed:          42
+
+Hyperparameters:
+  Batch size:  64
+  Epochs:      2
+  Learning rate: 0.001
+  Num workers: 0
+
+Data:
+  Train samples: 1536
+  Val samples:   384
+  Num classes (unique MIDI): 32
+
+Classes (MIDI -> class index):
+  class  0: MIDI 40
+  class  1: MIDI 41
+  class  2: MIDI 42
+  class  3: MIDI 43
+  class  4: MIDI 44
+  class  5: MIDI 45
+  class  6: MIDI 46
+  class  7: MIDI 47
+  class  8: MIDI 48
+  class  9: MIDI 49
+  class 10: MIDI 50
+  class 11: MIDI 51
+  class 12: MIDI 52
+  class 13: MIDI 53
+  class 14: MIDI 54
+  class 15: MIDI 55
+  class 16: MIDI 56
+  class 17: MIDI 57
+  class 18: MIDI 58
+  class 19: MIDI 59
+  class 20: MIDI 60
+  class 21: MIDI 61
+  class 22: MIDI 62
+  class 23: MIDI 63
+  class 24: MIDI 64
+  class 25: MIDI 65
+  class 26: MIDI 66
+  class 27: MIDI 67
+  class 28: MIDI 68
+  class 29: MIDI 69
+  class 30: MIDI 70
+  class 31: MIDI 71
+
+Training history:
+  Epoch 01: train_loss=3.3315, train_acc=0.0723, val_loss=3.2777, val_acc=0.1068
+  Epoch 02: train_loss=3.0604, train_acc=0.1139, val_loss=3.3701, val_acc=0.0469
+
+Best epoch:
+  Epoch:     1
+  Val loss:  3.2777
+  Val acc:   0.1068
+
+Confusion matrix (rows=true, cols=pred):
+[[0 0 0 ... 0 0 0]
+ [0 0 0 ... 0 0 0]
+ [0 0 0 ... 0 0 0]
+ ...
+ [0 0 0 ... 0 0 0]
+ [0 0 0 ... 0 0 0]
+ [0 0 0 ... 0 0 0]]

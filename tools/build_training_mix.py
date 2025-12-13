@@ -10,19 +10,14 @@ import random
 Example usage:
 
 Use all data from both datasets (no per-class cap):
-python tools/build_training_mix.py \
-  --datasets data/strat_neck_40 data/strat_neck_119 \
-  --train-ratio 0.8 \
-  --output data/training_mix_neck_40_119_all.csv \
-  --seed 42
 
-Cap at 40 samples per pos from the given datasets:
-python tools/build_training_mix.py \
-  --datasets data/strat_neck_40 data/strat_bridge_40 \
-  --max-per-class 40 \
-  --train-ratio 0.8 \
-  --output data/training_mix_neck_bridge_40.csv \
-  --seed 42
+    cd ~/code/fretListener
+
+    python tools/build_training_mix.py \
+      --datasets data/strat_neck_40 data/strat_neck_119 \
+      --train-ratio 0.8 \
+      --seed 42
+
 """
 
 
@@ -275,8 +270,8 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="data/training_mix.csv",
-        help="Path to output training mix CSV. Default: data/training_mix.csv",
+        default="recipes/training_mix.csv",
+        help="Path to output training mix CSV. Default: recipes/training_mix.csv",
     )
     parser.add_argument(
         "--seed",

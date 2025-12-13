@@ -386,20 +386,16 @@ def create_run_dir(model_type: str = "note") -> Path:
     Create a unique artifacts subdirectory for this training run.
 
     Layout:
-      <project_root>/artifacts/<model_type>_YYYYMMDD_HHMMSS[_NN]
-
-    If a directory with the base timestamp already exists (e.g. from a previous
-    run in the same second), an incrementing numeric suffix is appended.
+      <project_root>/artifacts/models/<model_type>_YYYYMMDD_HHMMSS[_NN]
     """
     root = get_project_root()
-    artifacts_root = root / "artifacts"
+    artifacts_root = root / "artifacts" / "models"
     artifacts_root.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = f"{model_type}_{ts}"
     run_dir = artifacts_root / base_name
 
-    # Ensure uniqueness even if called multiple times within the same second
     suffix = 1
     while run_dir.exists():
         run_dir = artifacts_root / f"{base_name}_{suffix:02d}"

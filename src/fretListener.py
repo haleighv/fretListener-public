@@ -209,9 +209,9 @@ class NoteInferenceGUI:
             'highlightbackground': '#f0f0f0',
             'borderwidth': 1,
             'relief': tk.RAISED,
-            'padx': 10,
-            'pady': 5,
-            'font': ('Arial', 11)
+            'padx': 16,   # was 10
+            'pady': 10,   # was 5
+            'font': ('Arial', 12)  # was 11
         }
         
         self.button_disabled_style = {
@@ -349,9 +349,9 @@ class NoteInferenceGUI:
             
             # Update label when slider moves
             def make_update_func(v, l):
-                return lambda x: l.config(text=f"{v.get():.3f}")
-            var.trace('w', make_update_func(var, value_label))
-        
+                return lambda *args: l.config(text=f"{v.get():.3f}")
+            var.trace_add('write', make_update_func(var, value_label))
+
         # Other settings
         ttk.Label(left_panel, text="Other Settings", font=("Arial", 10, "bold")).grid(row=7, column=0, columnspan=3, pady=(15, 5))
         
@@ -441,7 +441,7 @@ class NoteInferenceGUI:
         
         # Control buttons
         control_frame = ttk.Frame(left_panel)
-        control_frame.grid(row=11, column=0, columnspan=3, pady=20)
+        control_frame.grid(row=11, column=0, columnspan=3, pady=30)
         
         self.start_button = tk.Button(control_frame, text="Start", command=self.start_inference,
                                       **self.button_style)
@@ -452,6 +452,9 @@ class NoteInferenceGUI:
         self.stop_button.config(state="disabled")
         self.stop_button.grid(row=0, column=1, padx=5)
         
+        self.start_button.config(width=10)
+        self.stop_button.config(width=10)
+
         # RIGHT PANEL - Visualization
         right_panel = ttk.Frame(main_frame)
         right_panel.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))

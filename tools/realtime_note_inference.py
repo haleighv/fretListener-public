@@ -11,6 +11,14 @@ import torch
 import torchaudio
 from scipy.io import wavfile
 
+import sys
+
+# Ensure <repo_root>/src is importable when running from tools/
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 from note_model import NoteCNN
 
 
@@ -24,28 +32,30 @@ Realtime note inference with capture path matched to guitarDatasetCollector.py:
 - mel+db preprocessing on CPU (matches training transforms; avoids MPS FFT limitations)
 - WAV saving: raw captured audio + chosen inference window
 - NEW:
-  - print top-5 candidates for the chosen window
-  - enforce --margin (top1_conf - top2_conf must be >= margin)
+  - print top-k candidates for the chosen window
+  - enforce --margin (top1_prob - top2_prob must be >= margin)  [default: 0.10]
   - if margin fails AND top-2 are adjacent semitone, run pitch tie-break
-  - print "Top-2 approach" results per trigger
+  - print ambiguity + tie-break outcome per trigger
 """
+
 """
 Usage:
 cd ~/code/fretListener
 
 python tools/realtime_note_inference.py \
-  --checkpoint artifacts/note_20251211_164726/note_cnn_best.pt \
+  --checkpoint artifacts/models/note_20251211_164726/note_cnn_best.pt \
   --trigger-threshold 0.01 \
   --pre-ms 50 \
   --post-ms 500 \
   --silence-threshold 0.006 \
   --min-silence-ms 80 \
-  --confidence 0.85 \
   --sweep-step-ms 5 \
   --block-size 512 \
+  --topk 5 \
+  --margin 0.10 \
   --save-dir artifacts/captures
-
 """
+
 
 # -----------------------------
 # Compute device
@@ -97,7 +107,6 @@ def load_checkpoint(checkpoint_path: Path, model_device: torch.device) -> Dict[s
     )
     db = torchaudio.transforms.AmplitudeToDB()
 
-    # idx_to_midi may be dict with int keys or strings depending on save/load
     idx_to_midi = ckpt["idx_to_midi"]
     if isinstance(idx_to_midi, dict):
         idx_to_midi_norm = {int(k): int(v) for k, v in idx_to_midi.items()}
@@ -172,7 +181,7 @@ def predict_topk_window(
 ) -> Tuple[List[Tuple[int, str, float]], torch.Tensor]:
     """
     Returns:
-      candidates: list of (midi, name, prob) sorted desc by prob, length=min(topk, num_classes)
+      candidates: list of (midi, name, prob) sorted desc by prob
       probs: full probability tensor [1, num_classes] (on CPU)
     """
     w = _peak_normalize(window_1d) if peak_normalize else window_1d.astype(np.float32)
@@ -222,14 +231,11 @@ def estimate_f0_autocorr_hz(
     y = y - float(np.mean(y))
     y = _peak_normalize(y)
 
-    # window to reduce edge effects
     win = np.hanning(y.size).astype(np.float32)
     y = y * win
 
-    # autocorr (biased ok for tie-break)
     r = np.correlate(y, y, mode="full")[y.size - 1:]
 
-    # ignore lag 0; find peak in plausible lag range
     lag_min = int(sr / fmax)
     lag_max = int(sr / fmin)
     if lag_max <= lag_min + 2 or lag_max >= r.size:
@@ -244,7 +250,6 @@ def estimate_f0_autocorr_hz(
     if best_lag <= 0:
         return None
 
-    # reject if correlation peak too weak
     peak = float(seg[i])
     if peak <= 0:
         return None
@@ -261,14 +266,14 @@ def pitch_tiebreak_adjacent(
     sr: int,
     midi_a: int,
     midi_b: int,
-) -> Optional[int]:
+) -> Tuple[Optional[int], Optional[float]]:
     """
     If f0 estimate is valid, pick whichever MIDI is closer in Hz.
-    Returns chosen midi, or None if no valid pitch estimate.
+    Returns: (chosen_midi or None, f0_hz or None)
     """
     f0 = estimate_f0_autocorr_hz(window, sr=sr)
     if f0 is None:
-        return None
+        return None, None
 
     fa = midi_to_freq_hz(midi_a)
     fb = midi_to_freq_hz(midi_b)
@@ -276,7 +281,7 @@ def pitch_tiebreak_adjacent(
     da = abs(f0 - fa)
     db = abs(f0 - fb)
 
-    return midi_a if da <= db else midi_b
+    return (midi_a if da <= db else midi_b), float(f0)
 
 
 # -----------------------------
@@ -288,18 +293,16 @@ def sweep_best_window(
     state: Dict[str, Any],
     sweep_step_samples: int,
     topk: int,
-) -> Tuple[int, np.ndarray, List[Tuple[int, str, float]], int]:
+) -> Tuple[int, np.ndarray, List[Tuple[int, str, float]]]:
     """
     Sweep and select the window with highest top-1 confidence.
 
     Returns:
       best_start (int),
       best_window (np.ndarray attack-sized),
-      best_topk (list[(midi,name,prob)]),
-      best_peak (int)  [not used; kept signature stable if desired later]
+      best_topk (list[(midi,name,prob)])
     """
     attack = state["attack_samples"]
-    sr = state["sample_rate"]
 
     if captured.shape[0] < attack:
         padded = np.zeros(attack, dtype=np.float32)
@@ -309,7 +312,7 @@ def sweep_best_window(
     best_conf = -1.0
     best_start = 0
     best_window = captured[:attack].copy()
-    best_topk = []
+    best_topk: List[Tuple[int, str, float]] = []
 
     last_start = max(0, captured.shape[0] - attack)
     step = max(1, int(sweep_step_samples))
@@ -323,7 +326,6 @@ def sweep_best_window(
             topk=topk,
             peak_normalize=True,
         )
-
         if not topk_list:
             continue
 
@@ -334,7 +336,58 @@ def sweep_best_window(
             best_window = window.copy()
             best_topk = topk_list
 
-    return best_start, best_window, best_topk, 0
+    return best_start, best_window, best_topk
+
+
+# -----------------------------
+# WAV saving
+# -----------------------------
+
+def save_wav_int16(path: Path, sr: int, audio_float32: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    x = np.clip(audio_float32.astype(np.float32), -1.0, 1.0)
+    x_i16 = np.int16(x * 32767)
+    wavfile.write(str(path), sr, x_i16)
+
+
+# -----------------------------
+# Decision logic: margin + adjacent pitch tie-break
+# -----------------------------
+
+def decide_with_margin_and_pitch(
+    best_window: np.ndarray,
+    best_topk: List[Tuple[int, str, float]],
+    sr: int,
+    margin: float,
+) -> Tuple[int, str, float, str, bool, Optional[float]]:
+    """
+    Returns:
+      midi, name, prob, reason, was_ambiguous, f0_hz(optional)
+    """
+    if not best_topk:
+        return -1, "UNKNOWN", 0.0, "no_candidates", True, None
+
+    m1, n1, p1 = best_topk[0]
+    if len(best_topk) < 2:
+        return m1, n1, p1, "only_one_candidate", False, None
+
+    m2, n2, p2 = best_topk[1]
+    gap = p1 - p2
+
+    if gap >= margin:
+        return m1, n1, p1, f"margin_ok(gap={gap:.3f}>=margin={margin:.3f})", False, None
+
+    # ambiguous under margin
+    if abs(m1 - m2) == 1:
+        chosen, f0 = pitch_tiebreak_adjacent(best_window, sr=sr, midi_a=m1, midi_b=m2)
+        if chosen is not None:
+            if chosen == m1:
+                return m1, n1, p1, f"ambiguous_adjacent_pitch->top1(gap={gap:.3f}<margin={margin:.3f})", True, f0
+            return m2, n2, p2, f"ambiguous_adjacent_pitch->top2(gap={gap:.3f}<margin={margin:.3f})", True, f0
+
+        return m1, n1, p1, f"ambiguous_adjacent_no_pitch_keep_top1(gap={gap:.3f}<margin={margin:.3f})", True, None
+
+    return m1, n1, p1, f"ambiguous_non_adjacent_keep_top1(gap={gap:.3f}<margin={margin:.3f})", True, None
 
 
 # -----------------------------
@@ -379,65 +432,11 @@ def choose_channel(max_channels: int) -> int:
 
 
 # -----------------------------
-# WAV saving
-# -----------------------------
-
-def save_wav_int16(path: Path, sr: int, audio_float32: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    x = np.clip(audio_float32.astype(np.float32), -1.0, 1.0)
-    x_i16 = np.int16(x * 32767)
-    wavfile.write(str(path), sr, x_i16)
-
-
-# -----------------------------
-# Decision logic: margin + adjacent pitch tie-break
-# -----------------------------
-
-def decide_with_margin_and_pitch(
-    best_window: np.ndarray,
-    best_topk: List[Tuple[int, str, float]],
-    sr: int,
-    margin: float,
-) -> Tuple[int, str, float, str]:
-    """
-    Enforces margin; if margin fails AND top-2 are adjacent semitone, runs pitch tie-break.
-    Returns: (midi, name, conf, decision_reason)
-    """
-    if not best_topk:
-        return -1, "UNKNOWN", 0.0, "no_candidates"
-
-    m1, n1, p1 = best_topk[0]
-    if len(best_topk) < 2:
-        return m1, n1, p1, "only_one_candidate"
-
-    m2, n2, p2 = best_topk[1]
-    gap = p1 - p2
-
-    # Pass margin => accept top1
-    if gap >= margin:
-        return m1, n1, p1, f"margin_ok(gap={gap:.3f}>=margin={margin:.3f})"
-
-    # Fail margin
-    if abs(m1 - m2) == 1:
-        chosen = pitch_tiebreak_adjacent(best_window, sr=sr, midi_a=m1, midi_b=m2)
-        if chosen is not None:
-            if chosen == m1:
-                return m1, n1, p1, f"adjacent_pitch_tiebreak->top1(gap={gap:.3f}<margin={margin:.3f})"
-            return m2, n2, p2, f"adjacent_pitch_tiebreak->top2(gap={gap:.3f}<margin={margin:.3f})"
-
-        # No pitch estimate => keep top1 but mark ambiguous
-        return m1, n1, p1, f"adjacent_no_pitch_estimate_keep_top1(gap={gap:.3f}<margin={margin:.3f})"
-
-    # Not adjacent => keep top1 but mark ambiguous (enforced margin cannot resolve)
-    return m1, n1, p1, f"margin_fail_non_adjacent_keep_top1(gap={gap:.3f}<margin={margin:.3f})"
-
-
-# -----------------------------
 # Main
 # -----------------------------
 
 def main():
-    p = argparse.ArgumentParser(description="Realtime inference with matched capture path + margin + pitch tie-break.")
+    p = argparse.ArgumentParser(description="Realtime inference with capture path + margin + pitch tie-break.")
     p.add_argument("--checkpoint", required=True, type=str)
 
     # Trigger / capture
@@ -464,7 +463,7 @@ def main():
     p.add_argument("--topk", type=int, default=5,
                    help="How many candidates to print per trigger. Default 5.")
     p.add_argument("--margin", type=float, default=0.10,
-                   help="Required top1-top2 prob gap; if below and adjacent semitone, run pitch tie-break.")
+                   help="Required top1-top2 prob gap; if below and adjacent semitone, run pitch tie-break. Default 0.10.")
 
     # Debug capture saving
     p.add_argument("--save-dir", type=str, default="",
@@ -533,10 +532,6 @@ def main():
     reset_capture_state()
 
     def _prebuf_write(block: np.ndarray):
-        """
-        Writes the last N frames of the block into the circular pre-buffer.
-        Fixes a common regression: when frames > pre_samples, only the *latest* samples should remain.
-        """
         nonlocal pre_idx, pre_buffer
         if pre_buffer is None or pre_samples <= 0:
             return
@@ -545,12 +540,10 @@ def main():
         if frames <= 0:
             return
 
-        # keep only last pre_samples frames
         if frames > pre_samples:
             block = block[-pre_samples:]
             frames = block.shape[0]
 
-        # write with wrap
         end = pre_idx + frames
         if end <= pre_samples:
             pre_buffer[pre_idx:end, :] = block.astype(np.float32, copy=False)
@@ -563,19 +556,13 @@ def main():
         pre_idx = (pre_idx + frames) % pre_samples
 
     def _prebuf_read_channel() -> np.ndarray:
-        """
-        Returns chronological pre-buffer for selected channel.
-        """
         if pre_buffer is None or pre_samples <= 0:
             return np.zeros((0,), dtype=np.float32)
 
         if pre_idx == 0:
             return pre_buffer[:, ch].astype(np.float32, copy=True)
 
-        return np.concatenate([
-            pre_buffer[pre_idx:, ch],
-            pre_buffer[:pre_idx, ch],
-        ]).astype(np.float32, copy=True)
+        return np.concatenate([pre_buffer[pre_idx:, ch], pre_buffer[:pre_idx, ch]]).astype(np.float32, copy=True)
 
     def callback(indata, frames, time_info, status):
         nonlocal mode, timeout_ctr, silence_ctr
@@ -585,20 +572,16 @@ def main():
             if "overflow" in str(status).lower():
                 print("Audio overflow detected", flush=True)
 
-        # selected channel extraction (collector-style)
         chan = indata[:, ch].astype(np.float32, copy=False)
         peak = float(np.max(np.abs(chan))) if chan.size else 0.0
 
         if mode == "armed":
             timeout_ctr += frames
-
-            # update pre-buffer with ALL channels
             if pre_buffer is not None:
                 _prebuf_write(indata)
 
             if peak >= args.trigger_threshold:
                 pre_audio = _prebuf_read_channel()
-                # capture includes current block immediately after trigger as well
                 recording_parts = [pre_audio, chan.astype(np.float32, copy=True)]
                 recorded_post = int(chan.shape[0])
 
@@ -617,41 +600,42 @@ def main():
             if recorded_post >= post_samples:
                 cap = np.concatenate(recording_parts).astype(np.float32, copy=False)
 
-                # trim/pad to exact capture_total
                 if cap.shape[0] > capture_total:
                     cap = cap[:capture_total]
                 elif cap.shape[0] < capture_total:
                     cap = np.pad(cap, (0, capture_total - cap.shape[0]), mode="constant")
 
-                # pick best window by sweep (top1 confidence)
-                best_start, best_window, best_topk, _ = sweep_best_window(
+                best_start, best_window, best_topk = sweep_best_window(
                     captured=cap,
                     state=state,
                     sweep_step_samples=sweep_step_samples,
-                    topk=args.topk,
+                    topk=max(2, args.topk),
                 )
 
-                # Top-2 approach output
-                # Approach A: raw top1 on best window
+                # Raw top1
                 if best_topk:
                     a_midi, a_name, a_conf = best_topk[0]
                 else:
                     a_midi, a_name, a_conf = -1, "UNKNOWN", 0.0
 
-                # Approach B: margin enforced + adjacent pitch tie-break
-                b_midi, b_name, b_conf, reason = decide_with_margin_and_pitch(
+                # Margin + adjacent pitch tie-break (default margin=0.10)
+                b_midi, b_name, b_conf, reason, was_ambiguous, f0_hz = decide_with_margin_and_pitch(
                     best_window=best_window,
                     best_topk=best_topk,
                     sr=sr,
                     margin=args.margin,
                 )
 
-                # Print top-5
+                # Print top-k
                 print("Top candidates (best window):", flush=True)
                 for i, (m, n, p_) in enumerate(best_topk[:args.topk], start=1):
                     print(f"  {i:>2d}) {n:<4s} MIDI {m:<3d}  prob={p_:.3f}", flush=True)
 
-                # Print approaches + final
+                # Print ambiguity + tie-break outcome
+                if was_ambiguous:
+                    extra = f" f0={f0_hz:.1f}Hz" if f0_hz is not None else " f0=NA"
+                    print(f"AMBIGUOUS (<margin={args.margin:.3f}). {reason}.{extra}", flush=True)
+
                 print(
                     f"Approach A (top1): {a_name} (MIDI {a_midi}) prob={a_conf:.3f}  "
                     f"best_offset={best_start/sr:.3f}s",
@@ -670,7 +654,6 @@ def main():
                     best_path = save_dir / f"cap_{ts}_best_{b_name}_prob{b_conf:.2f}.wav"
                     save_wav_int16(raw_path, sr, cap)
 
-                    # chosen window must be attack-sized
                     win = best_window
                     if win.shape[0] < attack:
                         win = np.pad(win, (0, attack - win.shape[0]), mode="constant")
@@ -695,12 +678,6 @@ def main():
 
     print()
     print("Trigger armed. Play one note at a time.")
-    print("Workflow:")
-    print("  1) Wait for peak above trigger threshold -> trigger")
-    print("  2) Capture pre+post segment (collector-style)")
-    print("  3) Sweep windows; pick best-confidence window")
-    print("  4) Print top-k; apply margin; adjacent pitch tie-break if needed")
-    print("  5) Wait for silence -> re-arm")
     print("Ctrl+C to stop.")
     print()
 

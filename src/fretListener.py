@@ -157,6 +157,21 @@ class NoteInferenceGUI:
         # Configure style for dark mode compatibility
         self.setup_styles()
         
+        # Parameter descriptions for tooltips
+        self.param_descriptions = {
+            'trigger_threshold': 'Peak amplitude level that triggers audio capture (0.001-0.1)\nLower = more sensitive',
+            'pre_ms': 'Milliseconds of audio to capture BEFORE the trigger point\nCaptures the attack transient',
+            'post_ms': 'Milliseconds of audio to capture AFTER the trigger point\nEnsures full note is captured',
+            'silence_threshold': 'Peak level below which audio is considered silence\nUsed to detect when to re-arm',
+            'min_silence_ms': 'How long the signal must stay silent before re-arming\nPrevents retriggering on note decay',
+            'sweep_step_ms': 'Step size when searching for best inference window\nSmaller = more accurate but slower',
+            'margin': 'Required confidence gap between top 2 predictions\nHigher = more certain, but may miss ambiguous notes',
+            'topk': 'Number of top candidate notes to display in debug output',
+            'block_size': 'Audio buffer size in samples\nLarger = more stable but higher latency',
+            'save_dir': 'Directory to save captured WAV files for analysis',
+            'filter': 'Analyzes audio features to reject non-picked sounds:\n- Finger slides (poor harmonics)\n- Muted notes (weak attack)\n- Silence or noise'
+        }
+        
         # State
         self.inference_thread = None
         self.is_running = False
@@ -204,6 +219,34 @@ class NoteInferenceGUI:
             'fg': '#808080'
         }
         
+    def create_tooltip(self, widget, text):
+        """Create a tooltip that appears on hover"""
+        def on_enter(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            
+            # Create tooltip with white background for readability
+            label = tk.Label(tooltip, text=text, 
+                           font=("Arial", 10),
+                           background="lightyellow",
+                           foreground="black",
+                           relief="solid",
+                           borderwidth=1,
+                           padx=8, pady=6,
+                           justify=tk.LEFT)
+            label.pack()
+            
+            widget.tooltip = tooltip
+        
+        def on_leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+                del widget.tooltip
+        
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+    
     def setup_ui(self):
         """Create the GUI layout"""
         
@@ -258,7 +301,19 @@ class NoteInferenceGUI:
                  **self.button_style).grid(row=3, column=2)
         
         # Trigger Parameters section
-        ttk.Label(left_panel, text="Trigger Settings", font=("Arial", 10, "bold")).grid(row=5, column=0, columnspan=3, pady=(15, 5))
+        trigger_header_frame = ttk.Frame(left_panel)
+        trigger_header_frame.grid(row=5, column=0, columnspan=3, pady=(15, 5))
+        
+        ttk.Label(trigger_header_frame, text="Trigger Settings", 
+                 font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        
+        help_button = tk.Button(trigger_header_frame, text="?", 
+                              font=("Arial", 9, "bold"),
+                              bg="#4a90e2", fg="white",
+                              width=2, height=1,
+                              relief=tk.RAISED, borderwidth=1)
+        help_button.pack(side=tk.LEFT, padx=10)
+        self.create_tooltip(help_button, "Hover over any parameter label to see its description")
         
         params_frame = ttk.Frame(left_panel)
         params_frame.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E))
@@ -275,7 +330,12 @@ class NoteInferenceGUI:
         ]
         
         for i, (key, label, min_val, max_val, step) in enumerate(param_config):
-            ttk.Label(params_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            label_widget = ttk.Label(params_frame, text=label)
+            label_widget.grid(row=i, column=0, sticky=tk.W, pady=2)
+            
+            # Add tooltip to label
+            if key in self.param_descriptions:
+                self.create_tooltip(label_widget, self.param_descriptions[key])
             
             var = tk.DoubleVar(value=self.params[key])
             self.param_vars[key] = var
@@ -298,18 +358,27 @@ class NoteInferenceGUI:
         other_frame = ttk.Frame(left_panel)
         other_frame.grid(row=8, column=0, columnspan=3, sticky=(tk.W, tk.E))
         
-        ttk.Label(other_frame, text="Top-K:").grid(row=0, column=0, sticky=tk.W)
+        topk_label = ttk.Label(other_frame, text="Top-K:")
+        topk_label.grid(row=0, column=0, sticky=tk.W)
+        self.create_tooltip(topk_label, self.param_descriptions['topk'])
+        
         self.topk_var = tk.IntVar(value=self.params['topk'])
         tk.Spinbox(other_frame, from_=1, to=10, textvariable=self.topk_var, width=10,
                   bg='white', fg='black', insertbackground='black').grid(row=0, column=1, padx=5)
         
-        ttk.Label(other_frame, text="Block Size:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        block_label = ttk.Label(other_frame, text="Block Size:")
+        block_label.grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.create_tooltip(block_label, self.param_descriptions['block_size'])
+        
         self.blocksize_var = tk.IntVar(value=self.params['block_size'])
         tk.Spinbox(other_frame, from_=128, to=2048, increment=128, 
                   textvariable=self.blocksize_var, width=10,
                   bg='white', fg='black', insertbackground='black').grid(row=1, column=1, padx=5)
         
-        ttk.Label(other_frame, text="Save Dir:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        save_label = ttk.Label(other_frame, text="Save Dir:")
+        save_label.grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.create_tooltip(save_label, self.param_descriptions['save_dir'])
+        
         self.save_dir_var = tk.StringVar(value=self.params['save_dir'])
         tk.Entry(other_frame, textvariable=self.save_dir_var, width=20,
                 bg='white', fg='black', insertbackground='black').grid(row=2, column=1, padx=5)
@@ -320,9 +389,59 @@ class NoteInferenceGUI:
                       bg='#f9f9f9', fg='black', activebackground='#f0f0f0',
                       selectcolor='white').grid(row=2, column=2, padx=5)
         
+        # Filter settings
+        ttk.Label(left_panel, text="Note Filtering", font=("Arial", 10, "bold")).grid(row=9, column=0, columnspan=3, pady=(15, 5))
+        
+        filter_frame = ttk.Frame(left_panel)
+        filter_frame.grid(row=10, column=0, columnspan=3, sticky=(tk.W, tk.E))
+        
+        self.filter_enabled_var = tk.BooleanVar(value=False)  # Start disabled by default
+        filter_checkbox = tk.Checkbutton(filter_frame, text="Enable filter (experimental)", 
+                      variable=self.filter_enabled_var,
+                      bg='#f9f9f9', fg='black', activebackground='#f0f0f0',
+                      selectcolor='white', font=("Arial", 10, "bold"),
+                      command=self.on_filter_toggle)
+        filter_checkbox.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=5)
+        self.create_tooltip(filter_checkbox, self.param_descriptions['filter'])
+        
+        ttk.Label(filter_frame, text="(Attempts to reject slides and muted notes)", 
+                 font=("Arial", 9, "italic")).grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=20)
+        
+        # Advanced filter settings (initially hidden)
+        self.filter_advanced_frame = ttk.Frame(filter_frame)
+        # Don't grid it initially - will be shown when filter is enabled
+        
+        ttk.Label(self.filter_advanced_frame, text="Filter Thresholds:", 
+                 font=("Arial", 9, "bold")).grid(row=0, column=0, columnspan=2, pady=(5, 3))
+        
+        # Filter threshold controls
+        self.filter_min_rms = tk.DoubleVar(value=0.0005)
+        ttk.Label(self.filter_advanced_frame, text="Min RMS:", font=("Arial", 9)).grid(row=1, column=0, sticky=tk.W, padx=(10, 5))
+        rms_spin = tk.Spinbox(self.filter_advanced_frame, from_=0.0001, to=0.01, increment=0.0001, 
+                             textvariable=self.filter_min_rms, width=8, format="%.4f",
+                             bg='white', fg='black', font=("Arial", 9))
+        rms_spin.grid(row=1, column=1, padx=5)
+        self.create_tooltip(rms_spin, "Minimum RMS energy\nLower = accepts quieter sounds")
+        
+        self.filter_min_peak_ratio = tk.DoubleVar(value=2.0)
+        ttk.Label(self.filter_advanced_frame, text="Min Peak/RMS:", font=("Arial", 9)).grid(row=2, column=0, sticky=tk.W, padx=(10, 5))
+        peak_spin = tk.Spinbox(self.filter_advanced_frame, from_=1.5, to=5.0, increment=0.1, 
+                              textvariable=self.filter_min_peak_ratio, width=8, format="%.1f",
+                              bg='white', fg='black', font=("Arial", 9))
+        peak_spin.grid(row=2, column=1, padx=5)
+        self.create_tooltip(peak_spin, "Minimum peak-to-RMS ratio\nLower = accepts softer attacks")
+        
+        self.filter_min_harmonics = tk.DoubleVar(value=0.1)
+        ttk.Label(self.filter_advanced_frame, text="Min Harmonics:", font=("Arial", 9)).grid(row=3, column=0, sticky=tk.W, padx=(10, 5))
+        harm_spin = tk.Spinbox(self.filter_advanced_frame, from_=0.0, to=0.5, increment=0.05, 
+                              textvariable=self.filter_min_harmonics, width=8, format="%.2f",
+                              bg='white', fg='black', font=("Arial", 9))
+        harm_spin.grid(row=3, column=1, padx=5)
+        self.create_tooltip(harm_spin, "Minimum harmonic strength\nLower = accepts noisier sounds")
+        
         # Control buttons
         control_frame = ttk.Frame(left_panel)
-        control_frame.grid(row=9, column=0, columnspan=3, pady=20)
+        control_frame.grid(row=11, column=0, columnspan=3, pady=20)
         
         self.start_button = tk.Button(control_frame, text="Start", command=self.start_inference,
                                       **self.button_style)
@@ -696,8 +815,159 @@ class NoteInferenceGUI:
             pre_buffer[:pre_idx, ch]
         ]).astype(np.float32, copy=True)
     
+    def analyze_audio_features(self, audio, sr):
+        """Analyze audio features to determine if it's a picked note
+        
+        Returns: (is_picked_note, features_dict)
+        """
+        features = {}
+        
+        # 1. Check for sufficient energy (not silence)
+        rms = np.sqrt(np.mean(audio ** 2))
+        features['rms'] = float(rms)
+        
+        # 2. Peak-to-RMS ratio (picked notes have sharp attacks)
+        peak = float(np.max(np.abs(audio)))
+        features['peak'] = peak
+        features['peak_to_rms'] = peak / rms if rms > 1e-6 else 0
+        
+        # 3. Zero crossing rate (picked notes have more periodic ZCR)
+        zcr = np.sum(np.abs(np.diff(np.sign(audio)))) / (2 * len(audio))
+        features['zcr'] = float(zcr)
+        
+        # 4. Spectral centroid (finger slides have different frequency distribution)
+        fft = np.abs(np.fft.rfft(audio))
+        freqs = np.fft.rfftfreq(len(audio), 1/sr)
+        
+        if np.sum(fft) > 0:
+            spectral_centroid = np.sum(freqs * fft) / np.sum(fft)
+            features['spectral_centroid'] = float(spectral_centroid)
+        else:
+            features['spectral_centroid'] = 0
+        
+        # 5. Attack detection - measure energy in first 30ms vs next 30ms
+        attack_samples = int(0.03 * sr)  # 30ms windows
+        if len(audio) > attack_samples * 2:
+            early_energy = np.mean(audio[:attack_samples] ** 2)
+            later_energy = np.mean(audio[attack_samples:attack_samples*2] ** 2)
+            # For picked notes, later energy should typically be lower than early (decay)
+            # But allow for sustain - just check it's not growing too much
+            features['attack_ratio'] = float(later_energy / early_energy) if early_energy > 1e-6 else 1.0
+        else:
+            features['attack_ratio'] = 1.0
+        
+        # 6. Simplified harmonic check - just check for some periodicity
+        if len(audio) > sr // 50:  # At least 20ms of audio
+            # Simple autocorrelation peak check
+            norm_audio = audio - np.mean(audio)
+            if np.std(norm_audio) > 0:
+                norm_audio = norm_audio / np.std(norm_audio)
+                
+                # Just check for ANY significant autocorrelation peak
+                min_lag = int(sr / 1200)  # 1200 Hz max
+                max_lag = min(int(sr / 50), len(norm_audio) // 2)  # 50 Hz min
+                
+                if max_lag > min_lag:
+                    autocorr = np.correlate(norm_audio, norm_audio, mode='full')
+                    autocorr = autocorr[len(autocorr)//2:]  # Take positive lags
+                    
+                    # Normalize by zero-lag value
+                    if autocorr[0] > 0:
+                        autocorr = autocorr / autocorr[0]
+                    
+                    if max_lag < len(autocorr) and min_lag < len(autocorr):
+                        autocorr_range = autocorr[min_lag:max_lag]
+                        if len(autocorr_range) > 0:
+                            features['harmonic_strength'] = float(np.max(np.abs(autocorr_range)))
+                        else:
+                            features['harmonic_strength'] = 0
+                    else:
+                        features['harmonic_strength'] = 0
+                else:
+                    features['harmonic_strength'] = 0
+            else:
+                features['harmonic_strength'] = 0
+        else:
+            features['harmonic_strength'] = 0
+        
+        # Get filter thresholds from GUI if available
+        min_rms = getattr(self, 'filter_min_rms', 0.0005)
+        min_peak_ratio = getattr(self, 'filter_min_peak_ratio', 2.0)
+        min_harmonics = getattr(self, 'filter_min_harmonics', 0.1)
+        max_attack_ratio = getattr(self, 'filter_max_attack_ratio', 2.0)
+        
+        # MUCH MORE LENIENT decision logic
+        is_picked = True
+        rejection_reasons = []
+        
+        # Only reject if REALLY silent
+        if features['rms'] < min_rms:
+            is_picked = False
+            rejection_reasons.append(f"silence(rms={features['rms']:.5f})")
+        
+        # Only reject if NO attack at all
+        elif features['peak_to_rms'] < min_peak_ratio:
+            is_picked = False
+            rejection_reasons.append(f"no_attack(p2r={features['peak_to_rms']:.1f})")
+        
+        # Only reject if attack is completely backwards (energy growing a lot)
+        elif features['attack_ratio'] > max_attack_ratio:
+            is_picked = False
+            rejection_reasons.append(f"reverse_attack({features['attack_ratio']:.2f})")
+        
+        # Only reject if absolutely no harmonic content
+        elif features['harmonic_strength'] < min_harmonics:
+            is_picked = False
+            rejection_reasons.append(f"no_harmonics({features['harmonic_strength']:.2f})")
+        
+        # Remove spectral centroid check - too unreliable
+        
+        features['is_picked'] = is_picked
+        features['rejection_reasons'] = rejection_reasons
+        
+        return is_picked, features
+    
+    def on_filter_toggle(self):
+        """Show/hide advanced filter settings when filter is toggled"""
+        if self.filter_enabled_var.get():
+            self.filter_advanced_frame.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        else:
+            self.filter_advanced_frame.grid_remove()
+    
     def process_captured_audio(self, captured, audio_state):
         """Process captured audio and run inference"""
+        # Check if filtering is enabled
+        if hasattr(self, 'filter_enabled_var') and self.filter_enabled_var.get():
+            # Update filter thresholds from GUI
+            if hasattr(self, 'filter_min_rms'):
+                self.filter_min_rms = self.filter_min_rms.get()
+            if hasattr(self, 'filter_min_peak_ratio'):
+                self.filter_min_peak_ratio = self.filter_min_peak_ratio.get()
+            if hasattr(self, 'filter_min_harmonics'):
+                self.filter_min_harmonics = self.filter_min_harmonics.get()
+            self.filter_max_attack_ratio = 2.0  # Fixed for now
+            
+            # Analyze if this is a picked note
+            is_picked, audio_features = self.analyze_audio_features(
+                captured, audio_state['sr']
+            )
+            
+            # Log the analysis
+            feature_msg = f"Audio features: RMS={audio_features['rms']:.4f}, "
+            feature_msg += f"Peak/RMS={audio_features['peak_to_rms']:.1f}, "
+            feature_msg += f"Harmonics={audio_features['harmonic_strength']:.2f}, "
+            feature_msg += f"Attack ratio={audio_features['attack_ratio']:.2f}"
+            self.send_message('debug', feature_msg)
+            
+            if not is_picked:
+                rejection_msg = f"FILTERED: {', '.join(audio_features['rejection_reasons'])}"
+                self.send_message('debug', rejection_msg)
+                self.send_message('status', "Filtered: likely not a picked note")
+                return
+            else:
+                self.send_message('debug', "PASSED filter: detected as picked note")
+        
+        # Proceed with normal inference
         # Sweep for best window
         best_start, best_window, best_topk = self.sweep_best_window(
             captured=captured,

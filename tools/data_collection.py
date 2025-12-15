@@ -22,6 +22,7 @@ from __future__ import annotations
 import csv
 import re
 import time
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -400,6 +401,9 @@ def build_metadata(
     frets_per_string: int
 ) -> None:
     """Build metadata CSV from organized directory."""
+    audio_dir = output_root / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
     meta_dir = output_root / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     
@@ -440,14 +444,16 @@ def build_metadata(
         if not wavs:
             continue
 
-        selected = wavs[:samples_per_take]
-
-        for wav_file in selected:
+        for wav_file in wavs:
             try:
-                data, sr = sf.read(str(wav_file), dtype="float32", always_2d=False)
+                dst_path = audio_dir / wav_file.name
+                if not dst_path.exists():
+                    shutil.copy2(str(wav_file), str(dst_path))
+
+                data, sr = sf.read(str(dst_path), dtype="float32", always_2d=False)
                 num_samples = int(data.shape[0]) if hasattr(data, "shape") else len(data)
 
-                take = extract_take_from_filename(wav_file.name)
+                take = extract_take_from_filename(dst_path.name)
                 pos = (string - 1) * frets_per_string_plus1 + fret
                 midi = midi_from_string_fret(string, fret)
                 note = midi_to_note_name(midi)
@@ -455,8 +461,8 @@ def build_metadata(
                 rows.append({
                     "id": file_id,
                     "dataset_name": output_root.name,
-                    "relpath": str(wav_file.relative_to(output_root)),
-                    "filename": wav_file.name,
+                    "relpath": str(dst_path.relative_to(output_root)),
+                    "filename": dst_path.name,
                     "string": string,
                     "fret": fret,
                     "pos": pos,
@@ -465,7 +471,7 @@ def build_metadata(
                     "take": take,
                     "sample_rate": int(sr),
                     "num_samples": num_samples,
-                    "source_relpath": str(wav_file.relative_to(output_root)),
+                    "source_relpath": str(dst_path.relative_to(output_root)),
                 })
                 file_id += 1
 
@@ -996,7 +1002,8 @@ class DataCollectionGUI:
                         blocksize=ANALYSIS_HOP,
                         channels=2,
                         dtype='float32',
-                        callback=output_callback
+                        callback=output_callback,
+                        latency='low'
                     )
                     self.output_stream.start()
                 except Exception as e:
@@ -1163,6 +1170,12 @@ class DataCollectionGUI:
 
     def stop_session(self):
         """Stop the entire session immediately."""
+        if self.is_recording:
+            self._stop_and_process()
+            self._log("Session stopped by user")
+            self.status_var.set("Session stopped")
+            return
+
         self.is_recording = False
 
         # functional: gate callbacks while stopping streams

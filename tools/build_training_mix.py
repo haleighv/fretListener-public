@@ -18,6 +18,12 @@ Use all data from both datasets (no per-class cap):
       --train-ratio 0.8 \
       --seed 42
 
+
+    python tools/build_training_mix.py \
+      --datasets data/strat_neck_40 data/strat_neck_119 data/rg550_neck_20 \
+      --train-ratio 0.8 \
+      --seed 42 \
+      --output recipes/training_mix_full_mine.csv
 """
 
 

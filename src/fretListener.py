@@ -220,32 +220,59 @@ class NoteInferenceGUI:
         }
         
     def create_tooltip(self, widget, text):
-        """Create a tooltip that appears on hover"""
+        def destroy_tooltip(_=None):
+            if hasattr(widget, "tooltip") and widget.tooltip is not None:
+                try:
+                    widget.tooltip.destroy()
+                except Exception:
+                    pass
+                widget.tooltip = None
+
         def on_enter(event):
-            tooltip = tk.Toplevel()
-            tooltip.wm_overrideredirect(True)
-            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
-            
-            # Create tooltip with white background for readability
-            label = tk.Label(tooltip, text=text, 
-                           font=("Arial", 10),
-                           background="lightyellow",
-                           foreground="black",
-                           relief="solid",
-                           borderwidth=1,
-                           padx=8, pady=6,
-                           justify=tk.LEFT)
+            destroy_tooltip()
+
+            tip = tk.Toplevel(self.root)  # parent to root explicitly
+            tip.wm_overrideredirect(True)
+
+            # Important: don't let tooltip take focus
+            try:
+                tip.wm_attributes("-topmost", True)
+            except Exception:
+                pass
+
+            x = event.x_root + 10
+            y = event.y_root + 10
+            tip.wm_geometry(f"+{x}+{y}")
+
+            label = tk.Label(
+                tip,
+                text=text,
+                font=("Arial", 10),
+                background="lightyellow",
+                foreground="black",
+                relief="solid",
+                borderwidth=1,
+                padx=8,
+                pady=6,
+                justify=tk.LEFT,
+            )
             label.pack()
-            
-            widget.tooltip = tooltip
-        
+
+            # If tooltip exists, it must not intercept future clicks
+            tip.bind("<ButtonPress>", destroy_tooltip)
+            tip.bind("<FocusOut>", destroy_tooltip)
+
+            widget.tooltip = tip
+
         def on_leave(event):
-            if hasattr(widget, 'tooltip'):
-                widget.tooltip.destroy()
-                del widget.tooltip
-        
+            destroy_tooltip()
+
         widget.bind("<Enter>", on_enter)
         widget.bind("<Leave>", on_leave)
+
+        # Kill tooltip on any click of the widget as well
+        widget.bind("<ButtonPress>", destroy_tooltip, add="+")
+
     
     def setup_ui(self):
         """Create the GUI layout"""

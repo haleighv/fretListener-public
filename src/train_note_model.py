@@ -26,7 +26,7 @@ Example usage:
 cd ~/code/fretListener
 
 python src/train_note_model.py \
-  --mix-csv data/training_mix_neck.csv \
+  --mix-csv recipes/training_mix_neck.csv \
   --batch-size 64 \
   --epochs 30
 

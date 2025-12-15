@@ -209,9 +209,20 @@ def main():
     device = get_device()
     state = load_checkpoint(Path(args.checkpoint), device)
 
+    # --- Debug prints (added back) ---
+    print(f"Device: {device}")
+    print(f"Checkpoint: {args.checkpoint}")
+    print(f"Model sample_rate: {state['sample_rate']}")
+    print(f"Attack_samples: {state['attack_samples']}")
+    print(f"Mel num_frames: {state['num_frames']}")
+    print()
+
     # ---------- Single ----------
     if args.wav:
-        spec = load_and_preprocess(Path(args.wav), state)
+        wav_path = Path(args.wav)
+        print(f"[single] wav: {wav_path}")
+
+        spec = load_and_preprocess(wav_path, state)
         spec = spec.to(device)
 
         with torch.no_grad():
@@ -227,6 +238,14 @@ def main():
     bases = [int(x) for x in args.string_base_midi.split(",")]
     root = Path(args.dataset_root)
     files = sorted(root.glob(args.glob))
+
+    # --- Debug prints (added back) ---
+    print(f"[batch] dataset_root: {root}")
+    print(f"[batch] glob: {args.glob}")
+    print(f"[batch] files matched: {len(files)}")
+    print(f"[batch] margin: {args.margin:.3f}")
+    print(f"[batch] string_base_midi: {bases}")
+    print()
 
     total = correct = ambiguous = tiebreak_run = tiebreak_changed = 0
 
@@ -252,7 +271,25 @@ def main():
         if m1 == exp:
             correct += 1
 
-        if (p1 - p2) < args.margin:
+        gap = (p1 - p2)
+
+        # --- Debug prints (added back) ---
+        # Only print per-file details when ambiguous OR wrong, so batch output stays usable.
+        wrong = (m1 != exp)
+        is_amb = (gap < args.margin)
+        if wrong or is_amb:
+            print(f"File: {p}")
+            print(f"  pos: s{pos[0]}_f{pos[1]}  expected: {midi_to_name(exp)} (m{exp})")
+            print(f"  top1: {midi_to_name(m1)} (m{m1}) p={p1:.3f}")
+            print(f"  top2: {midi_to_name(m2)} (m{m2}) p={p2:.3f}")
+            print(f"  gap: {gap:.3f}  margin: {args.margin:.3f}  ambiguous: {is_amb}")
+            if wrong:
+                print("  RESULT: WRONG (top1)")
+            else:
+                print("  RESULT: OK (top1)")
+            # tie-break debug below if applicable
+
+        if is_amb:
             ambiguous += 1
             if abs(m1 - m2) == 1:
                 tiebreak_run += 1
@@ -263,12 +300,27 @@ def main():
                     if chosen != m1:
                         tiebreak_changed += 1
 
+                    # --- Debug prints (added back) ---
+                    if wrong or is_amb:
+                        print(f"  tiebreak: f0={f0:.1f}Hz  choose={midi_to_name(chosen)} (m{chosen})"
+                              f"  dist1={abs(f0 - midi_to_freq(m1)):.1f}  dist2={abs(f0 - midi_to_freq(m2)):.1f}"
+                              f"  changed={chosen != m1}")
+                else:
+                    if wrong or is_amb:
+                        print("  tiebreak: f0=None (skipped)")
+            else:
+                if wrong or is_amb:
+                    print("  tiebreak: skipped (non-adjacent candidates)")
+
+        if wrong or is_amb:
+            print()
+
     print()
     print("Batch summary")
     print("-------------")
     print(f"Evaluated:           {total}")
     print(f"Correct (top1):      {correct}")
-    print(f"Accuracy (top1):     {correct/total:.4f}")
+    print(f"Accuracy (top1):     {correct/total:.4f}" if total else "Accuracy (top1):     n/a")
     print(f"Ambiguous (<margin): {ambiguous}")
     print(f"Tie-break run:       {tiebreak_run}")
     print(f"Tie-break changed:   {tiebreak_changed}")

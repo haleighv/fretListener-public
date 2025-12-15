@@ -1,1 +1,3 @@
 .DS_Store
+tools/datacollection/processed_dataset/*
+tools/datacollection/raw_daw_recordings/*.wav

@@ -35,6 +35,13 @@ import queue
 
 
 # ============================
+# VERSION
+# ============================
+
+VERSION = "1.0"
+
+
+# ============================
 # CAPTURE / ONSET CONFIG
 # ============================
 
@@ -99,6 +106,14 @@ def midi_to_note_name(midi: int) -> str:
     note = NOTE_NAMES[midi % 12]
     octave = midi // 12 - 1
     return f"{note}{octave}"
+
+
+def string_num_to_name(string_num: int) -> str:
+    """Convert string number (6-1) to note name."""
+    midi = STANDARD_TUNING_MIDI.get(string_num)
+    if midi is None:
+        return f"String {string_num}"
+    return midi_to_note_name(midi)
 
 
 def parse_class_name(name: str) -> Tuple[int, int, int]:
@@ -185,11 +200,16 @@ def chop_recording(
     output_dir: Path,
     string_num: int,
     fret: int,
-    session: str = "A"
+    session: str = "A",
+    max_takes: Optional[int] = None
 ) -> int:
     """
     Chop a recording into individual clips based on onset detection.
     Applies high-pass filter and fade-in/out to eliminate pops/artifacts.
+    Ensures each clip contains only one note by truncating at the next onset.
+    
+    Args:
+        max_takes: If provided, only save at most this many clips.
     
     Returns number of clips saved.
     """
@@ -207,6 +227,10 @@ def chop_recording(
     onsets = detect_onsets(audio)
     total_samples = len(audio)
     
+    # Limit onsets to max_takes if specified
+    if max_takes is not None and len(onsets) > max_takes:
+        onsets = onsets[:max_takes]
+    
     # Create smooth fade windows (raised cosine)
     fade_ms = 3
     fade_samples = int(TARGET_SR * fade_ms / 1000)
@@ -222,12 +246,45 @@ def chop_recording(
     clips_saved = 0
     for take_idx, onset_idx in enumerate(onsets, start=1):
         start = max(0, onset_idx - PRE_ROLL_SAMPLES)
-        end = start + CLIP_SAMPLES
+        
+        # Determine end point: either CLIP_SAMPLES or just before the next onset
+        ideal_end = start + CLIP_SAMPLES
+        
+        # Find next onset to avoid overlap
+        next_onset = None
+        for future_onset in onsets[take_idx:]:  # onsets after this one
+            if future_onset > onset_idx:
+                next_onset = future_onset
+                break
+        
+        # If there's a next onset, truncate before it (with small buffer for pre-roll)
+        if next_onset is not None:
+            # Leave room for the next note's pre-roll
+            max_end = next_onset - PRE_ROLL_SAMPLES
+            end = min(ideal_end, max_end)
+        else:
+            end = ideal_end
+        
+        # Ensure minimum clip length (at least half the desired duration)
+        min_clip_samples = CLIP_SAMPLES // 2
+        if end - start < min_clip_samples:
+            # If too short due to truncation, use ideal end but pad with silence if needed
+            end = ideal_end
         
         if end > total_samples:
-            continue
+            # Pad with silence if we run past the end
+            clip = np.zeros(end - start, dtype=np.float32)
+            available = total_samples - start
+            if available > 0:
+                clip[:available] = audio[start:total_samples]
+        else:
+            clip = audio[start:end].copy()
         
-        clip = audio[start:end].copy()
+        # Pad to full CLIP_SAMPLES if shorter (ensures consistent length)
+        if len(clip) < CLIP_SAMPLES:
+            padded = np.zeros(CLIP_SAMPLES, dtype=np.float32)
+            padded[:len(clip)] = clip
+            clip = padded
         
         # Apply fade-in at start
         if fade_in is not None and len(clip) >= len(fade_in):
@@ -500,20 +557,91 @@ def build_metadata(
 
 
 # ============================
+# STATUS LIGHT WIDGET
+# ============================
+
+class StatusLight(tk.Canvas):
+    """A status indicator light widget."""
+    
+    COLORS = {
+        "ready": "#4ade80",      # Green
+        "busy": "#ef4444",       # Red
+        "stopped": "#4b5563",    # Dark gray
+        "paused": "#9ca3af",     # Light gray (for blinking)
+    }
+    
+    def __init__(self, parent, size: int = 40, **kwargs):
+        super().__init__(parent, width=size + 4, height=size + 4, 
+                        highlightthickness=0, **kwargs)
+        self.size = size
+        self.state = "stopped"
+        self.blink_on = True
+        self.blink_job = None
+        self._draw()
+    
+    def _draw(self):
+        """Draw the status light."""
+        self.delete("all")
+        padding = 2
+        
+        if self.state == "paused" and not self.blink_on:
+            color = self["bg"]  # Match background when "off" in blink
+        else:
+            color = self.COLORS.get(self.state, self.COLORS["stopped"])
+        
+        # Draw outer ring
+        self.create_oval(padding, padding, 
+                        self.size + padding, self.size + padding,
+                        fill=color, outline="#1e1e1e", width=2)
+    
+    def set_state(self, state: str):
+        """Set the status light state."""
+        if self.blink_job:
+            self.after_cancel(self.blink_job)
+            self.blink_job = None
+        
+        self.state = state
+        self.blink_on = True
+        
+        if state == "paused":
+            self._start_blinking()
+        else:
+            self._draw()
+    
+    def _start_blinking(self):
+        """Start the blinking animation for paused state."""
+        self.blink_on = not self.blink_on
+        self._draw()
+        self.blink_job = self.after(500, self._start_blinking)
+
+
+# ============================
 # GUI APP - SINGLE WINDOW
 # ============================
 
 class DataCollectionGUI:
     """Main GUI application for data collection - batch recording approach."""
 
+    # String number to human-readable name
+    STRING_NAMES = {
+        6: "low E",
+        5: "A",
+        4: "D",
+        3: "G",
+        2: "B",
+        1: "high E"
+    }
+
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("FretListener Data Collection")
+        self.root.title("FretListener Data Collection v%s" % VERSION)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.configure(bg="#1e1e1e")
 
         # State
         self.is_recording = False
+        self.is_paused = False
+        self.session_active = False  # Track if we're in an active session
         self._stopping = False  # functional: gate callbacks during shutdown
         self.stream: Optional[sd.InputStream] = None
         self.output_stream: Optional[sd.OutputStream] = None
@@ -546,6 +674,12 @@ class DataCollectionGUI:
         # Monitoring cache (functional: avoid Tk calls in audio threads)
         self.monitor_enabled = True
         self.monitor_audio = None
+
+        # Track previous note for redo functionality
+        self.previous_note: Optional[Tuple[int, int]] = None  # (string, fret)
+        
+        # Transition animation job
+        self._transition_job = None
 
         # Current target
         self.string_var = tk.IntVar(value=6)
@@ -611,6 +745,9 @@ class DataCollectionGUI:
         style.configure("Action.TButton",
                        font=("Arial", 11),
                        padding=(15, 10))
+        style.configure("Redo.TButton",
+                       font=("Arial", 10),
+                       padding=(10, 8))
 
         # Main container
         main = ttk.Frame(self.root, padding="15")
@@ -619,6 +756,20 @@ class DataCollectionGUI:
         # === LEFT COLUMN: Config + Controls ===
         left_col = ttk.Frame(main)
         left_col.pack(side="left", fill="y", padx=(0, 15))
+
+        # Instructions
+        instr_frame = ttk.LabelFrame(left_col, text="Instructions", padding="10")
+        instr_frame.pack(fill="x", pady=(0, 10))
+        
+        instructions = (
+            "1. Select audio device & channel\n"
+            "2. Configure dataset settings\n"
+            "3. Press START SESSION\n"
+            "4. Play each note until light turns red\n"
+            "5. Wait for auto-advance to next note"
+        )
+        ttk.Label(instr_frame, text=instructions, font=("Arial", 9), 
+                 justify="left").pack(anchor="w")
 
         # Audio Device
         device_frame = ttk.LabelFrame(left_col, text="Audio Device", padding="10")
@@ -674,51 +825,57 @@ class DataCollectionGUI:
         self.session_var = tk.StringVar(value="A")
         ttk.Entry(dataset_frame, textvariable=self.session_var, width=30).pack(fill="x", pady=(2, 0))
 
-        # Control Buttons
-        btn_frame = ttk.Frame(left_col)
-        btn_frame.pack(fill="x", pady=15)
+        # Session Control
+        session_frame = ttk.LabelFrame(left_col, text="Session Control", padding="10")
+        session_frame.pack(fill="x", pady=(0, 10))
 
         self.record_btn = ttk.Button(
-            btn_frame, 
+            session_frame, 
             text="START SESSION",
             command=self.start_recording,
             style="Start.TButton"
         )
         self.record_btn.pack(fill="x", pady=(0, 8))
 
+        self.pause_btn = ttk.Button(
+            session_frame,
+            text="PAUSE SESSION",
+            command=self.toggle_pause,
+            state="disabled",
+            style="Action.TButton"
+        )
+        self.pause_btn.pack(fill="x", pady=(0, 8))
+
         self.stop_btn = ttk.Button(
-            btn_frame,
+            session_frame,
             text="STOP SESSION",
             command=self.stop_session,
             state="disabled",
             style="Stop.TButton"
         )
-        self.stop_btn.pack(fill="x")
+        self.stop_btn.pack(fill="x", pady=(0, 8))
 
-        # Progress
-        progress_frame = ttk.LabelFrame(left_col, text="Progress", padding="10")
-        progress_frame.pack(fill="x", pady=(0, 10))
+        # Redo buttons
+        redo_frame = ttk.Frame(session_frame)
+        redo_frame.pack(fill="x", pady=(5, 0))
 
-        ttk.Label(progress_frame, text="Current Note:").pack(anchor="w")
-        self.pb_note = ttk.Progressbar(progress_frame, maximum=100, value=0, 
-                                        length=200, style="Accent.Horizontal.TProgressbar")
-        self.pb_note.pack(fill="x", pady=(2, 2))
-        self.pb_note_label = ttk.Label(progress_frame, text="0 / 10 takes")
-        self.pb_note_label.pack(anchor="w", pady=(0, 8))
+        self.redo_current_btn = ttk.Button(
+            redo_frame,
+            text="Redo Current Note",
+            command=self.redo_current_note,
+            state="disabled",
+            style="Redo.TButton"
+        )
+        self.redo_current_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        ttk.Label(progress_frame, text="Current String:").pack(anchor="w")
-        self.pb_string = ttk.Progressbar(progress_frame, maximum=100, value=0, 
-                                          length=200, style="Accent.Horizontal.TProgressbar")
-        self.pb_string.pack(fill="x", pady=(2, 2))
-        self.pb_string_label = ttk.Label(progress_frame, text="0 / 13 frets")
-        self.pb_string_label.pack(anchor="w", pady=(0, 8))
-
-        ttk.Label(progress_frame, text="Total Session:").pack(anchor="w")
-        self.pb_total = ttk.Progressbar(progress_frame, maximum=100, value=0, 
-                                         length=200, style="Accent.Horizontal.TProgressbar")
-        self.pb_total.pack(fill="x", pady=(2, 2))
-        self.pb_total_label = ttk.Label(progress_frame, text="0 / 78 notes")
-        self.pb_total_label.pack(anchor="w")
+        self.redo_last_btn = ttk.Button(
+            redo_frame,
+            text="Redo Last Note",
+            command=self.redo_last_note,
+            state="disabled",
+            style="Redo.TButton"
+        )
+        self.redo_last_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         # Audio Monitor
         monitor_frame = ttk.LabelFrame(left_col, text="Audio Monitor", padding="10")
@@ -728,20 +885,34 @@ class DataCollectionGUI:
         ttk.Checkbutton(monitor_frame, text="Enable monitoring (hear input)", 
                        variable=self.monitor_var).pack(anchor="w")
 
-        # Dataset Actions
-        actions_frame = ttk.LabelFrame(left_col, text="Actions", padding="10")
-        actions_frame.pack(fill="x")
-
-        ttk.Button(actions_frame, text="Build Metadata",
-                  command=self.build_metadata_action,
-                  style="Action.TButton").pack(fill="x")
-
         # === RIGHT COLUMN: Display ===
         right_col = ttk.Frame(main)
         right_col.pack(side="left", fill="both", expand=True)
 
-        # Current Target Display
-        target_display = ttk.Frame(right_col)
+        # Status Box (above fretboard)
+        status_box = ttk.LabelFrame(right_col, text="Status", padding="10")
+        status_box.pack(fill="x", pady=(0, 10))
+        
+        status_content = ttk.Frame(status_box)
+        status_content.pack(fill="x")
+        
+        # Status light (larger)
+        self.status_light = StatusLight(status_content, size=40, bg=bg_dark)
+        self.status_light.pack(side="left", padx=(0, 15))
+        
+        # Status cue text (large bold)
+        self.status_cue_var = tk.StringVar(value="Ready")
+        self.status_cue_label = tk.Label(status_content, textvariable=self.status_cue_var,
+                                         font=("Arial", 24, "bold"),
+                                         fg=fg, bg=bg_dark)
+        self.status_cue_label.pack(side="left", fill="x", expand=True, anchor="w")
+
+        # Fretboard Box (contains note display + fretboard)
+        fretboard_frame = ttk.LabelFrame(right_col, text="Fretboard", padding="5")
+        fretboard_frame.pack(fill="x", pady=(0, 10))
+
+        # Current Target Display (inside fretboard frame)
+        target_display = ttk.Frame(fretboard_frame)
         target_display.pack(fill="x", pady=(0, 10))
 
         # Big note display
@@ -762,18 +933,40 @@ class DataCollectionGUI:
         self.midi_label = ttk.Label(info_frame, text="MIDI: 40", font=("Arial", 12), foreground=fg_dim)
         self.midi_label.pack(anchor="w")
 
-        # Status
-        self.status_var = tk.StringVar(value="Ready - Select target and start recording")
-        status_label = ttk.Label(right_col, textvariable=self.status_var,
-                                font=("Arial", 11), foreground=fg_dim)
-        status_label.pack(anchor="w", pady=(0, 10))
-
-        # Fretboard
-        fretboard_frame = ttk.LabelFrame(right_col, text="Fretboard", padding="5")
-        fretboard_frame.pack(fill="x", pady=(0, 10))
-
+        # Fretboard canvas
         self.fretboard = GuitarFretboard(fretboard_frame, frets=24)
         self.fretboard.pack()
+
+        # Progress (below fretboard)
+        progress_frame = ttk.LabelFrame(right_col, text="Progress", padding="10")
+        progress_frame.pack(fill="x", pady=(0, 10))
+
+        # Current Note progress
+        self.pb_note_title = ttk.Label(progress_frame, text="Current Note [E2]")
+        self.pb_note_title.pack(anchor="w")
+        self.pb_note = ttk.Progressbar(progress_frame, maximum=100, value=0, 
+                                        length=200, style="Accent.Horizontal.TProgressbar")
+        self.pb_note.pack(fill="x", pady=(2, 2))
+        self.pb_note_label = ttk.Label(progress_frame, text="0 / 10 takes")
+        self.pb_note_label.pack(anchor="w", pady=(0, 8))
+
+        # Current String progress
+        self.pb_string_title = ttk.Label(progress_frame, text="Current String [E2]")
+        self.pb_string_title.pack(anchor="w")
+        self.pb_string = ttk.Progressbar(progress_frame, maximum=100, value=0, 
+                                          length=200, style="Accent.Horizontal.TProgressbar")
+        self.pb_string.pack(fill="x", pady=(2, 2))
+        self.pb_string_label = ttk.Label(progress_frame, text="0 / 13 frets")
+        self.pb_string_label.pack(anchor="w", pady=(0, 8))
+
+        # Session progress
+        self.pb_total_title = ttk.Label(progress_frame, text="Session")
+        self.pb_total_title.pack(anchor="w")
+        self.pb_total = ttk.Progressbar(progress_frame, maximum=100, value=0, 
+                                         length=200, style="Accent.Horizontal.TProgressbar")
+        self.pb_total.pack(fill="x", pady=(2, 2))
+        self.pb_total_label = ttk.Label(progress_frame, text="0 / 78 notes")
+        self.pb_total_label.pack(anchor="w")
 
         # Log
         log_frame = ttk.LabelFrame(right_col, text="Log", padding="5")
@@ -816,7 +1009,10 @@ class DataCollectionGUI:
 
     def _process_audio_queue(self):
         """Process audio data from the queue in the main thread."""
-        if not self.is_recording:
+        if not self.is_recording or self.is_paused:
+            if self.is_paused and self.session_active:
+                # Keep polling while paused
+                self.root.after(50, self._process_audio_queue)
             return
 
         # Process all available chunks in the queue
@@ -841,13 +1037,19 @@ class DataCollectionGUI:
                     if self.last_rms <= 0 or rms > self.last_rms * 1.5:
                         self.onset_count += 1
                         self.samples_since_onset = 0
-                        self._update_onset_progress() # Call directly now
+                        self._update_onset_progress()
+                        
+                        # Turn red as soon as final take is registered
+                        if self.onset_count >= self.takes_per_note:
+                            self.status_light.set_state("busy")
+                            self.status_cue_var.set("Stop")
+                            
             elif rms < SILENCE_THRESHOLD:
                 if self.onset_count >= self.takes_per_note:
                     self.silence_samples += len(mono)
                     if self.silence_samples >= SILENCE_SAMPLES and not self.should_advance:
                         self.should_advance = True
-                        self._check_advance() # Call directly now
+                        self._check_advance()
 
             self.last_rms = rms
 
@@ -888,29 +1090,76 @@ class DataCollectionGUI:
             fret = self.fret_var.get()
             midi = midi_from_string_fret(string, fret)
             note = midi_to_note_name(midi)
+            string_name = string_num_to_name(string)
             
             self.note_display_var.set(note)
             self.string_label.config(text=f"String: {string}")
             self.fret_label.config(text=f"Fret: {fret}")
             self.midi_label.config(text=f"MIDI: {midi}")
             
+            # Update progress bar titles
+            self.pb_note_title.config(text=f"Current Note [{note}]")
+            self.pb_string_title.config(text=f"Current String [{string_name}]")
+            
             self.fretboard.show_note(string, fret)
         except:
             pass
 
+    def _update_status_cue(self):
+        """Update the status cue text based on current state."""
+        string = self.string_var.get()
+        fret = self.fret_var.get()
+        string_name = self.STRING_NAMES.get(string, f"string {string}")
+        
+        if fret == 0:
+            fret_text = "open"
+        else:
+            fret_text = f"{fret}th fret"
+            if fret == 1:
+                fret_text = "1st fret"
+            elif fret == 2:
+                fret_text = "2nd fret"
+            elif fret == 3:
+                fret_text = "3rd fret"
+        
+        self.status_cue_var.set(f"Play {fret_text} on {string_name}!")
+
     def _ensure_output_dirs(self):
-        """Ensure output directories exist."""
+        """Ensure output directories exist, preferring local 'data' but falling back to Documents."""
         guitar = safe_slug(self.guitar_var.get()) or "guitar"
         pickup = safe_slug(self.pickup_var.get()) or "bridge"
         takes = self.takes_var.get()
         
         dataset_name = f"{guitar}_{pickup}_{takes}"
-        self.output_root = Path("data") / dataset_name
+        
+        # 1. Attempt to use local relative path ("data/...")
+        local_path = Path("data") / dataset_name
+        
+        try:
+            # Try to create the directory immediately. If successful, use this path.
+            local_path.mkdir(parents=True, exist_ok=True)
+            self.output_root = local_path
+            self._log(f"Using local output path: {self.output_root.resolve()}")
+            
+        except OSError:
+            # 2. Fallback to a user-writable path if permission/read-only error occurs
+            # This is necessary for PyInstaller-built applications on macOS/Windows.
+            fallback_path = Path.home() / "Documents" / "FretListener_Data" / dataset_name
+            fallback_path.mkdir(parents=True, exist_ok=True)
+            self.output_root = fallback_path
+            self._log(f"Using Documents fallback path: {self.output_root.resolve()}")
+
+        # Ensure the final "organized" and "raw" subdirectories exist within the chosen root
         self.organized_dir = self.output_root / "organized"
         self.organized_dir.mkdir(parents=True, exist_ok=True)
+        # Note: The raw dir is created in _stop_and_process, but creating it here is safer.
+        (self.output_root / "raw").mkdir(parents=True, exist_ok=True)
 
     def next_note(self):
         """Move to next note in sequence."""
+        # Store current note as previous before advancing
+        self.previous_note = (self.string_var.get(), self.fret_var.get())
+        
         string = self.string_var.get()
         fret = self.fret_var.get()
         max_fret = self.frets_var.get()
@@ -954,6 +1203,8 @@ class DataCollectionGUI:
             self.has_had_audio = False
             self.takes_per_note = self.takes_var.get()
             self._stopping = False
+            self.is_paused = False
+            self.session_active = True
 
             # Update progress display
             self.pb_note['maximum'] = 100
@@ -979,8 +1230,9 @@ class DataCollectionGUI:
                 if self.monitor_enabled:
                     self.monitor_audio = mono
 
-                # 2. Dump to Queue (Fast) - Logic happens later
-                self.audio_queue.put(mono)
+                # 2. Dump to Queue (Fast) - Logic happens later (skip if paused)
+                if not self.is_paused:
+                    self.audio_queue.put(mono)
 
             def output_callback(outdata, frames, time_info, status):
                 if self._stopping or (not self.monitor_enabled) or (self.monitor_audio is None):
@@ -1024,12 +1276,16 @@ class DataCollectionGUI:
             self.is_recording = True
             self.record_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
+            self.pause_btn.config(state="normal")
+            self.redo_current_btn.config(state="normal")
+            self.redo_last_btn.config(state="normal" if self.previous_note else "disabled")
 
             string = self.string_var.get()
             fret = self.fret_var.get()
             note = midi_to_note_name(midi_from_string_fret(string, fret))
             
-            self.status_var.set(f"Recording {note} - Play {self.takes_per_note} times")
+            self._update_status_cue()
+            self.status_light.set_state("ready")
             self._log(f"Recording s{string}_f{fret} ({note})")
             
             # START THE PROCESSING LOOP
@@ -1038,6 +1294,198 @@ class DataCollectionGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start recording: {e}")
             self.is_recording = False
+
+    def toggle_pause(self):
+        """Toggle pause state."""
+        if not self.session_active:
+            return
+        
+        self.is_paused = not self.is_paused
+        
+        if self.is_paused:
+            self.pause_btn.config(text="RESUME SESSION")
+            self.status_cue_var.set("Paused")
+            self.status_light.set_state("paused")
+            self._log("Session paused")
+        else:
+            self.pause_btn.config(text="PAUSE SESSION")
+            self._update_status_cue()
+            self.status_light.set_state("ready")
+            self._log("Session resumed")
+            # Resume audio processing
+            if self.is_recording:
+                self.root.after(10, self._process_audio_queue)
+
+    def redo_current_note(self):
+        """Redo the current note - erase current recording and restart."""
+        if not self.session_active:
+            return
+        
+        string = self.string_var.get()
+        fret = self.fret_var.get()
+        session = self.session_var.get().strip() or "A"
+        
+        # Show redo status
+        self.status_cue_var.set("Redo")
+        self.status_light.set_state("busy")
+        self.root.update()
+        
+        # Stop current recording without processing
+        was_recording = self.is_recording
+        was_paused = self.is_paused
+        
+        if was_recording:
+            self._stop_streams_only()
+        
+        # Delete any existing files for this note
+        if self.organized_dir:
+            class_dir = self.organized_dir / f"s{string}_f{fret}"
+            if class_dir.exists():
+                for wav_file in class_dir.glob(f"*_sess{session}.wav"):
+                    try:
+                        wav_file.unlink()
+                        self._log(f"Deleted {wav_file.name}")
+                    except Exception as e:
+                        self._log(f"Failed to delete {wav_file.name}: {e}")
+        
+        # Delete raw file for this note
+        if self.output_root:
+            raw_dir = self.output_root / "raw"
+            if raw_dir.exists():
+                for raw_file in raw_dir.glob(f"raw_s{string}_f{fret}_sess{session}_*.wav"):
+                    try:
+                        raw_file.unlink()
+                        self._log(f"Deleted raw/{raw_file.name}")
+                    except Exception as e:
+                        self._log(f"Failed to delete raw/{raw_file.name}: {e}")
+        
+        # Clear buffer
+        self.recording_buffer = []
+        
+        note = midi_to_note_name(midi_from_string_fret(string, fret))
+        self._log(f"Redoing note s{string}_f{fret} ({note})")
+        
+        # Restart recording
+        self.root.after(300, self.start_recording)
+
+    def redo_last_note(self):
+        """Redo the last note - go back one note and restart."""
+        if not self.session_active or not self.previous_note:
+            return
+        
+        prev_string, prev_fret = self.previous_note
+        current_string = self.string_var.get()
+        current_fret = self.fret_var.get()
+        session = self.session_var.get().strip() or "A"
+        
+        # Show redo status
+        self.status_cue_var.set("Redo")
+        self.status_light.set_state("busy")
+        self.root.update()
+        
+        # Stop current recording without processing
+        was_recording = self.is_recording
+        
+        if was_recording:
+            self._stop_streams_only()
+        
+        # Delete current note files
+        if self.organized_dir:
+            class_dir = self.organized_dir / f"s{current_string}_f{current_fret}"
+            if class_dir.exists():
+                for wav_file in class_dir.glob(f"*_sess{session}.wav"):
+                    try:
+                        wav_file.unlink()
+                        self._log(f"Deleted {wav_file.name}")
+                    except Exception as e:
+                        self._log(f"Failed to delete {wav_file.name}: {e}")
+        
+        # Delete current raw file
+        if self.output_root:
+            raw_dir = self.output_root / "raw"
+            if raw_dir.exists():
+                for raw_file in raw_dir.glob(f"raw_s{current_string}_f{current_fret}_sess{session}_*.wav"):
+                    try:
+                        raw_file.unlink()
+                        self._log(f"Deleted raw/{raw_file.name}")
+                    except Exception as e:
+                        self._log(f"Failed to delete raw/{raw_file.name}: {e}")
+        
+        # Delete previous note files
+        if self.organized_dir:
+            class_dir = self.organized_dir / f"s{prev_string}_f{prev_fret}"
+            if class_dir.exists():
+                for wav_file in class_dir.glob(f"*_sess{session}.wav"):
+                    try:
+                        wav_file.unlink()
+                        self._log(f"Deleted {wav_file.name}")
+                    except Exception as e:
+                        self._log(f"Failed to delete {wav_file.name}: {e}")
+        
+        # Delete previous raw file
+        if self.output_root:
+            raw_dir = self.output_root / "raw"
+            if raw_dir.exists():
+                for raw_file in raw_dir.glob(f"raw_s{prev_string}_f{prev_fret}_sess{session}_*.wav"):
+                    try:
+                        raw_file.unlink()
+                        self._log(f"Deleted raw/{raw_file.name}")
+                    except Exception as e:
+                        self._log(f"Failed to delete raw/{raw_file.name}: {e}")
+        
+        # Clear buffer
+        self.recording_buffer = []
+        
+        # Go back to previous note
+        self.string_var.set(prev_string)
+        self.fret_var.set(prev_fret)
+        
+        # Update previous_note to go back further if needed
+        # Calculate the note before prev_note
+        max_fret = self.frets_var.get()
+        new_prev_fret = prev_fret - 1
+        new_prev_string = prev_string
+        if new_prev_fret < 0:
+            new_prev_fret = max_fret
+            new_prev_string = prev_string + 1
+            if new_prev_string > 6:
+                # We're at the very beginning
+                self.previous_note = None
+            else:
+                self.previous_note = (new_prev_string, new_prev_fret)
+        else:
+            self.previous_note = (new_prev_string, new_prev_fret)
+        
+        note = midi_to_note_name(midi_from_string_fret(prev_string, prev_fret))
+        self._log(f"Going back to note s{prev_string}_f{prev_fret} ({note})")
+        
+        self._update_all_progress()
+        
+        # Restart recording
+        self.root.after(300, self.start_recording)
+
+    def _stop_streams_only(self):
+        """Stop audio streams without processing the buffer."""
+        self.is_recording = False
+        self._stopping = True
+        
+        if self.output_stream is not None:
+            try:
+                self.output_stream.stop()
+                self.output_stream.close()
+            except:
+                pass
+            self.output_stream = None
+        
+        if self.stream is not None:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except:
+                pass
+            self.stream = None
+        
+        self._stopping = False
 
     def _update_onset_progress(self):
         """Update onset progress display (called from main thread)."""
@@ -1050,6 +1498,12 @@ class DataCollectionGUI:
         string = self.string_var.get()
         fret = self.fret_var.get()
         max_fret = self.frets_var.get()
+        
+        # Update titles
+        note = midi_to_note_name(midi_from_string_fret(string, fret))
+        string_name = string_num_to_name(string)
+        self.pb_note_title.config(text=f"Current Note [{note}]")
+        self.pb_string_title.config(text=f"Current String [{string_name}]")
         
         # String progress (frets completed on current string)
         frets_per_string = max_fret + 1
@@ -1065,6 +1519,21 @@ class DataCollectionGUI:
         self.pb_total['value'] = total_progress
         self.pb_total_label.config(text=f"{notes_done} / {total_notes} notes")
 
+    def _set_progress_complete(self):
+        """Set all progress bars to 100% complete."""
+        max_fret = self.frets_var.get()
+        frets_per_string = max_fret + 1
+        total_notes = 6 * frets_per_string
+        
+        self.pb_note['value'] = 100
+        self.pb_note_label.config(text=f"{self.takes_per_note} / {self.takes_per_note} takes")
+        
+        self.pb_string['value'] = 100
+        self.pb_string_label.config(text=f"{frets_per_string} / {frets_per_string} frets")
+        
+        self.pb_total['value'] = 100
+        self.pb_total_label.config(text=f"{total_notes} / {total_notes} notes")
+
     def _check_advance(self):
         """Check if we should advance (called from main thread via after())."""
         if not self.should_advance or not self.is_recording:
@@ -1072,13 +1541,56 @@ class DataCollectionGUI:
         self.should_advance = False
         self._auto_stop_and_advance()
 
+    def _show_next_note_transition(self, callback):
+        """Show 'Next note' transition then call callback."""
+        self.status_cue_var.set("Next note")
+        self.status_light.set_state("busy")
+        self.root.update()
+        
+        # Brief pause for visual feedback
+        self.root.after(400, callback)
+
     def _auto_stop_and_advance(self):
         """Auto-stop recording, process, and advance to next note."""
         if not self.is_recording:
             return
         
         # Stop and process current recording
-        self._stop_and_process()
+        clips_saved = self._stop_and_process()
+        
+        # Check if we need to redo due to insufficient takes
+        if clips_saved is not None and clips_saved < self.takes_per_note:
+            self._log(f"Only {clips_saved} takes detected, need {self.takes_per_note}. Redoing...")
+            self.status_cue_var.set("Redo - not enough takes!")
+            self.status_light.set_state("busy")
+            self.root.update()
+            
+            # Delete the insufficient clips and raw file
+            string = self.string_var.get()
+            fret = self.fret_var.get()
+            session = self.session_var.get().strip() or "A"
+            
+            if self.organized_dir:
+                class_dir = self.organized_dir / f"s{string}_f{fret}"
+                if class_dir.exists():
+                    for wav_file in class_dir.glob(f"*_sess{session}.wav"):
+                        try:
+                            wav_file.unlink()
+                        except:
+                            pass
+            
+            if self.output_root:
+                raw_dir = self.output_root / "raw"
+                if raw_dir.exists():
+                    for raw_file in raw_dir.glob(f"raw_s{string}_f{fret}_sess{session}_*.wav"):
+                        try:
+                            raw_file.unlink()
+                        except:
+                            pass
+            
+            # Restart recording for this note after a delay
+            self.root.after(500, self.start_recording)
+            return
         
         # Check if we've completed the session
         string = self.string_var.get()
@@ -1087,27 +1599,67 @@ class DataCollectionGUI:
         
         # Check if this was the last note (string 1, max fret)
         if string == 1 and fret == max_fret:
-            self._log("Session complete!")
-            self.status_var.set("Session complete!")
+            self._complete_session()
             return
         
-        # Advance to next note
-        self.next_note()
+        # Show transition and advance to next note
+        def do_advance():
+            self.next_note()
+            self.root.after(100, self.start_recording)
         
-        # Auto-start recording for next note after short delay
-        self.root.after(500, self.start_recording)
+        self._show_next_note_transition(do_advance)
 
-    def _stop_and_process(self):
-        """Stop recording and process without advancing."""
+    def _complete_session(self):
+        """Complete the session and build metadata."""
+        self._log("Session complete!")
+        self.status_cue_var.set("Complete!")
+        self.status_light.set_state("busy")
+        
+        # Set all progress bars to complete
+        self._set_progress_complete()
+        
+        self.root.update()
+        
+        # Build metadata automatically
+        try:
+            if self.output_root and self.organized_dir and self.organized_dir.exists():
+                build_metadata(
+                    self.output_root,
+                    self.organized_dir,
+                    self.takes_var.get(),
+                    self.frets_var.get()
+                )
+                self._log("Metadata built successfully")
+        except Exception as e:
+            self._log(f"Failed to build metadata: {e}")
+        
+        self.session_active = False
+        self.status_cue_var.set("Session complete!")
+        self.status_light.set_state("stopped")
+        
+        # Disable session buttons
+        self.pause_btn.config(state="disabled")
+        self.redo_current_btn.config(state="disabled")
+        self.redo_last_btn.config(state="disabled")
+
+    def _stop_and_process(self) -> Optional[int]:
+        """Stop recording and process without advancing. Returns clips saved or None."""
         if not self.is_recording:
-            return
+            return None
 
         # Mark as not recording first to stop callback processing
         self.is_recording = False
 
         # functional: gate callbacks while stopping streams
         self._stopping = True
+        
+        # Set status to busy while processing
+        self.status_cue_var.set("Stop")
+        self.status_light.set_state("busy")
+        self.root.update()
 
+        clips_saved = None
+        
         try:
             # functional: stop/close (avoid abort-related thread/GIL issues)
             if self.output_stream is not None:
@@ -1129,15 +1681,15 @@ class DataCollectionGUI:
             self.record_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
 
-            self.status_var.set("Processing...")
             self.root.update()  # Force UI update
 
             # Concatenate all recorded audio
             if not self.recording_buffer:
                 self._log("No audio recorded")
-                self.status_var.set("Ready")
+                self.status_cue_var.set("Ready")
+                self.status_light.set_state("stopped")
                 self._stopping = False
-                return
+                return None
 
 
             full_audio = np.concatenate(self.recording_buffer)
@@ -1165,13 +1717,14 @@ class DataCollectionGUI:
             sf.write(str(raw_dir / raw_filename), full_audio, TARGET_SR)
             self._log(f"Saved raw take to raw/{raw_filename}")
             # ====================================================
-            # Chop recording into clips
+            # Chop recording into clips (limit to takes_per_note)
             clips_saved = chop_recording(
                 full_audio,
                 class_dir,
                 string,
                 fret,
-                session
+                session,
+                max_takes=self.takes_per_note
             )
 
             self._log(f"Saved {clips_saved} clips to s{string}_f{fret}/")
@@ -1181,27 +1734,26 @@ class DataCollectionGUI:
             self.pb_note_label.config(text=f"{clips_saved} / {self.takes_per_note} takes")
 
             note = midi_to_note_name(midi_from_string_fret(string, fret))
-            self.status_var.set(f"Done - {clips_saved} clips for {note}")
 
             # Clear buffer
             self.recording_buffer = []
 
         except Exception as e:
             self._log(f"Error: {e}")
-            self.status_var.set("Error during processing")
+            self.status_cue_var.set("Error")
+            self.status_light.set_state("stopped")
         finally:
             # functional: release stop gate after streams are down
             self._stopping = False
+        
+        return clips_saved
 
     def stop_session(self):
-        """Stop the entire session immediately."""
-        if self.is_recording:
-            self._stop_and_process()
-            self._log("Session stopped by user")
-            self.status_var.set("Session stopped")
-            return
-
+        """Stop the entire session immediately, delete all artifacts, and reset to first note."""
+        # Stop streams first without processing
         self.is_recording = False
+        self.session_active = False
+        self.is_paused = False
 
         # functional: gate callbacks while stopping streams
         self._stopping = True
@@ -1222,12 +1774,68 @@ class DataCollectionGUI:
                 pass
             self.stream = None
         
-        self.record_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
         self.recording_buffer = []
         
-        self._log("Session stopped by user")
-        self.status_var.set("Session stopped")
+        # Delete all session artifacts
+        session = self.session_var.get().strip() or "A"
+        deleted_count = 0
+        
+        if self.organized_dir and self.organized_dir.exists():
+            # Delete all chopped clips from this session
+            for class_dir in self.organized_dir.iterdir():
+                if class_dir.is_dir() and class_dir.name.startswith("s"):
+                    for wav_file in class_dir.glob(f"*_sess{session}.wav"):
+                        try:
+                            wav_file.unlink()
+                            deleted_count += 1
+                        except:
+                            pass
+                    # Remove empty directories
+                    try:
+                        if not any(class_dir.iterdir()):
+                            class_dir.rmdir()
+                    except:
+                        pass
+        
+        if self.output_root:
+            # Delete all raw files from this session
+            raw_dir = self.output_root / "raw"
+            if raw_dir.exists():
+                for raw_file in raw_dir.glob(f"raw_*_sess{session}_*.wav"):
+                    try:
+                        raw_file.unlink()
+                        deleted_count += 1
+                    except:
+                        pass
+        
+        if deleted_count > 0:
+            self._log(f"Deleted {deleted_count} files from stopped session")
+        
+        # Reset to first note (string 6, fret 0)
+        self.string_var.set(6)
+        self.fret_var.set(0)
+        self.previous_note = None
+        
+        # Reset progress bars
+        self.pb_note['value'] = 0
+        self.pb_note_label.config(text=f"0 / {self.takes_var.get()} takes")
+        self.pb_string['value'] = 0
+        max_fret = self.frets_var.get()
+        self.pb_string_label.config(text=f"0 / {max_fret + 1} frets")
+        self.pb_total['value'] = 0
+        total_notes = 6 * (max_fret + 1)
+        self.pb_total_label.config(text=f"0 / {total_notes} notes")
+        
+        # Update UI state
+        self.record_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.pause_btn.config(text="PAUSE SESSION", state="disabled")
+        self.redo_current_btn.config(state="disabled")
+        self.redo_last_btn.config(state="disabled")
+        
+        self._log("Session stopped by user - reset to beginning")
+        self.status_cue_var.set("Ready")
+        self.status_light.set_state("stopped")
 
         # functional: release stop gate
         self._stopping = False
@@ -1235,28 +1843,6 @@ class DataCollectionGUI:
     def stop_recording(self):
         """Stop recording and process the captured audio (manual stop)."""
         self._stop_and_process()
-
-    def build_metadata_action(self):
-        """Build metadata for captured dataset."""
-        try:
-            self._ensure_output_dirs()
-            
-            if not self.organized_dir or not self.organized_dir.exists():
-                messagebox.showwarning("Warning", "No dataset found. Capture some notes first.")
-                return
-
-            build_metadata(
-                self.output_root,
-                self.organized_dir,
-                self.takes_var.get(),
-                self.frets_var.get()
-            )
-
-            self._log("Metadata built successfully")
-            messagebox.showinfo("Success", "Metadata built successfully")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to build metadata: {e}")
 
     def on_close(self):
         """Handle window close."""
@@ -1268,7 +1854,7 @@ class DataCollectionGUI:
 def main():
     """Main entry point."""
     root = tk.Tk()
-    root.minsize(950, 580)
+    root.minsize(950, 700)
     app = DataCollectionGUI(root)
     root.mainloop()
 

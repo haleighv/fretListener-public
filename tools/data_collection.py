@@ -31,13 +31,14 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 import librosa
+import queue
 
 
 # ============================
 # CAPTURE / ONSET CONFIG
 # ============================
 
-TARGET_SR = 16_000
+TARGET_SR = 48000
 
 PRE_ROLL_MS = 30
 CLIP_DURATION_MS = 600
@@ -50,7 +51,7 @@ ONSET_THRESHOLD = 0.010
 MIN_GAP_SEC = 0.35
 MIN_GAP_SAMPLES = int(TARGET_SR * MIN_GAP_SEC)
 
-ANALYSIS_HOP = 512
+ANALYSIS_HOP = 1024
 
 # Auto-stop after silence
 SILENCE_THRESHOLD = 0.005  # RMS below this = silence
@@ -813,6 +814,47 @@ class DataCollectionGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to query devices: {e}")
 
+    def _process_audio_queue(self):
+        """Process audio data from the queue in the main thread."""
+        if not self.is_recording:
+            return
+
+        # Process all available chunks in the queue
+        while not self.audio_queue.empty():
+            try:
+                mono = self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            # 1. Save to main buffer
+            self.recording_buffer.append(mono)
+
+            # 2. Logic (formerly in callback)
+            rms = compute_rms(mono)
+            self.samples_since_onset += len(mono)
+
+            if rms > ONSET_THRESHOLD:
+                self.has_had_audio = True
+                self.silence_samples = 0
+                
+                if self.samples_since_onset >= MIN_GAP_SAMPLES:
+                    if self.last_rms <= 0 or rms > self.last_rms * 1.5:
+                        self.onset_count += 1
+                        self.samples_since_onset = 0
+                        self._update_onset_progress() # Call directly now
+            elif rms < SILENCE_THRESHOLD:
+                if self.onset_count >= self.takes_per_note:
+                    self.silence_samples += len(mono)
+                    if self.silence_samples >= SILENCE_SAMPLES and not self.should_advance:
+                        self.should_advance = True
+                        self._check_advance() # Call directly now
+
+            self.last_rms = rms
+
+        # Schedule next check
+        if self.is_recording:
+            self.root.after(10, self._process_audio_queue)
+
     def _on_device_selected(self):
         """Handle device selection."""
         try:
@@ -885,7 +927,7 @@ class DataCollectionGUI:
         self._update_all_progress()
 
     def start_recording(self):
-        """Start recording audio for current target."""
+        """Start recording audio for current target using a thread-safe Queue."""
         if self.is_recording:
             return
 
@@ -899,20 +941,18 @@ class DataCollectionGUI:
 
             device_idx, _ = self.device_list[device_idx_combo]
             self._ensure_output_dirs()
-
-            # functional: cache monitor state for callbacks (avoid Tk access)
             self._sync_monitor_enabled()
 
             # Reset state
-            self.recording_buffer = []
+            self.recording_buffer = []  # We will fill this from the queue now
+            self.audio_queue = queue.Queue()  # <--- NEW: The buffer safety net
+            
             self.onset_count = 0
             self.last_rms = 0.0
             self.samples_since_onset = MIN_GAP_SAMPLES
             self.silence_samples = 0
             self.has_had_audio = False
             self.takes_per_note = self.takes_var.get()
-
-            # functional: clear shutdown gate
             self._stopping = False
 
             # Update progress display
@@ -921,17 +961,13 @@ class DataCollectionGUI:
             self.pb_note_label.config(text=f"0 / {self.takes_per_note} takes")
             self._update_all_progress()
 
-            # Flag for auto-advance (set from callback, processed in main thread)
             self.should_advance = False
             self.monitor_audio = None
 
+            # --- THE NEW LIGHTWEIGHT CALLBACK ---
             def audio_callback(indata, frames, time_info, status):
-                # Early exit if not recording / stopping
-                if (not self.is_recording) or self._stopping:
-                    return
-                    
                 if status:
-                    pass
+                    print(f"Audio status: {status}") # Print errors if they happen
 
                 # Get mono audio
                 if indata.ndim == 2:
@@ -939,45 +975,17 @@ class DataCollectionGUI:
                 else:
                     mono = indata.astype(np.float32, copy=True)
 
-                # Store in buffer
-                self.recording_buffer.append(mono)
-                
-                # Store for monitoring output (functional: no Tk access)
+                # 1. Update Monitor (Fast, atomic assignment)
                 if self.monitor_enabled:
-                    self.monitor_audio = mono.copy()
+                    self.monitor_audio = mono
 
-                # Live onset detection for progress feedback
-                rms = compute_rms(mono)
-                self.samples_since_onset += len(mono)
-
-                # Track if we've had audio above threshold
-                if rms > ONSET_THRESHOLD:
-                    self.has_had_audio = True
-                    self.silence_samples = 0
-                    
-                    if self.samples_since_onset >= MIN_GAP_SAMPLES:
-                        if self.last_rms <= 0 or rms > self.last_rms * 1.5:
-                            self.onset_count += 1
-                            self.samples_since_onset = 0
-                            self.root.after(0, self._update_onset_progress)
-                elif rms < SILENCE_THRESHOLD:
-                    # Only start counting silence after we have enough takes
-                    if self.onset_count >= self.takes_per_note:
-                        self.silence_samples += len(mono)
-                        
-                        # Set flag for main thread to handle
-                        if self.silence_samples >= SILENCE_SAMPLES and not self.should_advance:
-                            self.should_advance = True
-                            self.root.after(0, self._check_advance)
-
-                self.last_rms = rms
+                # 2. Dump to Queue (Fast) - Logic happens later
+                self.audio_queue.put(mono)
 
             def output_callback(outdata, frames, time_info, status):
-                # functional: never call Tk from audio thread; use cached monitor_enabled
                 if self._stopping or (not self.monitor_enabled) or (self.monitor_audio is None):
                     outdata.fill(0)
                     return
-
                 mono = self.monitor_audio
                 n = min(len(mono), frames)
                 outdata[:n, 0] = mono[:n]
@@ -985,6 +993,7 @@ class DataCollectionGUI:
                 if n < frames:
                     outdata[n:, :] = 0
 
+            # Start Input Stream
             self.stream = sd.InputStream(
                 device=device_idx,
                 channels=sd.query_devices(device_idx)['max_input_channels'],
@@ -994,7 +1003,7 @@ class DataCollectionGUI:
                 callback=audio_callback
             )
             
-            # Start output stream for monitoring (functional: cached flag)
+            # Start Output Stream
             if self.monitor_enabled:
                 try:
                     self.output_stream = sd.OutputStream(
@@ -1003,7 +1012,7 @@ class DataCollectionGUI:
                         channels=2,
                         dtype='float32',
                         callback=output_callback,
-                        latency='low'
+                        # latency='low' # KEEP THIS REMOVED
                     )
                     self.output_stream.start()
                 except Exception as e:
@@ -1022,6 +1031,9 @@ class DataCollectionGUI:
             
             self.status_var.set(f"Recording {note} - Play {self.takes_per_note} times")
             self._log(f"Recording s{string}_f{fret} ({note})")
+            
+            # START THE PROCESSING LOOP
+            self.root.after(10, self._process_audio_queue)
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start recording: {e}")
@@ -1127,6 +1139,7 @@ class DataCollectionGUI:
                 self._stopping = False
                 return
 
+
             full_audio = np.concatenate(self.recording_buffer)
             duration = len(full_audio) / TARGET_SR
             self._log(f"Recorded {duration:.1f}s")
@@ -1139,7 +1152,19 @@ class DataCollectionGUI:
             # Create output directory for this note
             class_dir = self.organized_dir / f"s{string}_f{fret}"
             class_dir.mkdir(parents=True, exist_ok=True)
-
+            # ====================================================
+            # + NEW CODE: Save raw full take
+            # ====================================================
+            raw_dir = self.output_root / "raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create a unique filename for the raw file
+            timestamp = int(time.time())
+            raw_filename = f"raw_s{string}_f{fret}_sess{session}_{timestamp}.wav"
+            
+            sf.write(str(raw_dir / raw_filename), full_audio, TARGET_SR)
+            self._log(f"Saved raw take to raw/{raw_filename}")
+            # ====================================================
             # Chop recording into clips
             clips_saved = chop_recording(
                 full_audio,

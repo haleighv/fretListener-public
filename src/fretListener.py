@@ -1,7 +1,23 @@
 #!/usr/bin/env python3
+"""
+fretListener.py - Real-time Guitar Note Inference
+
+A GUI application for real-time guitar note detection using neural networks.
+Features:
+- Queue-based audio capture for thread-safe processing
+- Audio monitoring (hear what you're playing)
+- Modern dark-mode UI
+- Visual fretboard display
+- Configurable trigger and inference parameters
+
+Dependencies:
+  pip install sounddevice soundfile numpy torch torchaudio scipy
+"""
+
+from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 import threading
 import queue
 import time
@@ -26,136 +42,241 @@ if str(SRC_DIR) not in sys.path:
 from note_model import NoteCNN
 
 
-class GuitarFretboard(tk.Canvas):
-    """Visual guitar fretboard widget showing played notes"""
+# ============================
+# VERSION
+# ============================
+
+VERSION = "2.0"
+
+
+# ============================
+# AUDIO CONFIG
+# ============================
+
+DEFAULT_SAMPLE_RATE = 48000
+ANALYSIS_HOP = 1024  # Block size for audio processing
+
+
+# ============================
+# STATUS LIGHT WIDGET
+# ============================
+
+class StatusLight(tk.Canvas):
+    """A status indicator light widget."""
     
-    # Standard tuning: E2, A2, D3, G3, B3, E4
-    STANDARD_TUNING = [40, 45, 50, 55, 59, 64]  # MIDI notes
-    STRING_NAMES = ['E', 'A', 'D', 'G', 'B', 'E']
+    COLORS = {
+        "armed": "#4ade80",       # Green - ready to detect
+        "capturing": "#facc15",   # Yellow - capturing audio
+        "processing": "#f97316",  # Orange - running inference
+        "detected": "#3b82f6",    # Blue - note detected
+        "stopped": "#4b5563",     # Dark gray - not running
+        "error": "#ef4444",       # Red - error state
+    }
     
-    def __init__(self, parent, frets=7, **kwargs):
-        super().__init__(parent, **kwargs)
-        self.frets = frets
-        self.active_notes: Set[Tuple[int, int]] = set()  # (string, fret)
-        
-        # Visual parameters
-        self.string_spacing = 30
-        self.fret_spacing = 60
-        self.margin_left = 40
-        self.margin_top = 30
-        self.dot_radius = 12
-        
-        # Calculate canvas size
-        width = self.margin_left + (self.frets + 1) * self.fret_spacing + 20
-        height = 2 * self.margin_top + 5 * self.string_spacing
-        self.config(width=width, height=height)
-        
-        self.draw_fretboard()
-        
-    def draw_fretboard(self):
-        """Draw the fretboard with strings, frets, and markers"""
+    def __init__(self, parent, size: int = 40, **kwargs):
+        super().__init__(parent, width=size + 4, height=size + 4, 
+                        highlightthickness=0, **kwargs)
+        self.size = size
+        self.state = "stopped"
+        self.pulse_on = True
+        self.pulse_job = None
+        self._draw()
+    
+    def _draw(self):
+        """Draw the status light."""
         self.delete("all")
+        padding = 2
         
-        # Draw frets
-        for fret in range(self.frets + 1):
-            x = self.margin_left + fret * self.fret_spacing
-            y1 = self.margin_top
-            y2 = self.margin_top + 5 * self.string_spacing
-            
-            # Nut (thicker line)
-            if fret == 0:
-                self.create_line(x, y1, x, y2, width=4, fill="#8B4513")
-            else:
-                self.create_line(x, y1, x, y2, width=2, fill="#D2691E")
-            
-            # Fret numbers
-            if fret > 0:
-                self.create_text(x, y2 + 15, text=str(fret), 
-                               font=("Arial", 10), fill="#666")
+        color = self.COLORS.get(self.state, self.COLORS["stopped"])
         
-        # Draw strings
-        for string in range(6):
-            y = self.margin_top + string * self.string_spacing
-            x1 = self.margin_left
-            x2 = self.margin_left + self.frets * self.fret_spacing
-            
-            # String thickness varies
-            thickness = 1 + (5 - string) * 0.3
-            self.create_line(x1, y, x2, y, width=thickness, fill="#C0C0C0")
-            
-            # String labels
-            self.create_text(x1 - 20, y, text=self.STRING_NAMES[5-string],
-                           font=("Arial", 12, "bold"), fill="#333")
+        # Pulse effect for certain states
+        if self.state in ("armed", "capturing") and not self.pulse_on:
+            # Dim the color slightly
+            color = self._dim_color(color, 0.6)
         
-        # Draw fret markers (dots)
-        marker_frets = [3, 5, 7]
-        for fret in marker_frets:
-            if fret <= self.frets:
-                x = self.margin_left + (fret - 0.5) * self.fret_spacing
-                y = self.margin_top + 2.5 * self.string_spacing
-                self.create_oval(x - 5, y - 5, x + 5, y + 5,
-                               fill="#E0E0E0", outline="#C0C0C0")
-        
-        # Redraw active notes
-        for string, fret in self.active_notes:
-            self._draw_note(string, fret, active=True)
+        # Draw outer ring
+        self.create_oval(padding, padding, 
+                        self.size + padding, self.size + padding,
+                        fill=color, outline="#1e1e1e", width=2)
     
-    def _draw_note(self, string: int, fret: int, active: bool = True):
-        """Draw a note on the fretboard"""
-        if fret > self.frets or string < 0 or string > 5:
-            return
-            
-        # Position calculation
-        if fret == 0:
-            x = self.margin_left - 15  # Open string position
+    def _dim_color(self, hex_color: str, factor: float) -> str:
+        """Dim a hex color by a factor."""
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        r = int(r * factor)
+        g = int(g * factor)
+        b = int(b * factor)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    
+    def set_state(self, state: str):
+        """Set the status light state."""
+        if self.pulse_job:
+            self.after_cancel(self.pulse_job)
+            self.pulse_job = None
+        
+        self.state = state
+        self.pulse_on = True
+        
+        if state in ("armed",):
+            self._start_pulse()
         else:
-            x = self.margin_left + (fret - 0.5) * self.fret_spacing
-            
-        y = self.margin_top + (5 - string) * self.string_spacing
+            self._draw()
+    
+    def _start_pulse(self):
+        """Start a subtle pulse animation."""
+        self.pulse_on = not self.pulse_on
+        self._draw()
+        self.pulse_job = self.after(800, self._start_pulse)
+
+
+# ============================
+# GUITAR FRETBOARD WIDGET
+# ============================
+
+class GuitarFretboard(tk.Canvas):
+    """Visual guitar fretboard widget showing played notes."""
+    
+    # Display order: index 0 = top of screen (high E), index 5 = bottom (low E)
+    STRING_NAMES_TOP_TO_BOTTOM = ["E4", "B3", "G3", "D3", "A2", "E2"]
+    
+    # Standard tuning MIDI notes
+    STANDARD_TUNING = [40, 45, 50, 55, 59, 64]  # E2, A2, D3, G3, B3, E4
+    
+    def __init__(self, parent, frets: int = 12, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.frets = int(frets)
+        self.active_notes: Set[Tuple[int, int]] = set()
+
+        self.string_spacing = 28
+        self.fret_spacing = 50
+        self.dot_radius = 10
+
+        width = self.fret_spacing * (self.frets + 1) + 80
+        height = self.string_spacing * 7 + 40
+
+        self.config(width=width, height=height, bg="#2b2b2b", highlightthickness=0)
+        self.draw_fretboard()
+
+    def draw_fretboard(self):
+        """Draw the fretboard."""
+        self.delete("all")
+
+        for fret in range(self.frets + 1):
+            x = 45 + fret * self.fret_spacing
+            y_start = 25
+            y_end = 25 + self.string_spacing * 5
+
+            if fret == 0:
+                self.create_line(x, y_start, x, y_end, width=5, fill="#d4a574")
+            else:
+                self.create_line(x, y_start, x, y_end, width=2, fill="#8b7355")
+
+        # Fret markers (between frets, not on them)
+        for fret in [3, 5, 7, 9, 15, 17, 19, 21]:
+            if fret <= self.frets:
+                x = 45 + fret * self.fret_spacing - self.fret_spacing // 2
+                marker_y = 25 + self.string_spacing * 2.5
+                self.create_oval(x - 4, marker_y - 4, x + 4, marker_y + 4,
+                               fill="#555", outline="")
         
-        # Draw note circle
-        color = "#FF4444" if active else "#FFD700"
-        self.create_oval(
-            x - self.dot_radius, y - self.dot_radius,
-            x + self.dot_radius, y + self.dot_radius,
-            fill=color, outline="#333", width=2, tags="note"
-        )
-    
-    def midi_to_fretboard(self, midi_note: int) -> List[Tuple[int, int]]:
-        """Convert MIDI note to possible (string, fret) positions"""
-        positions = []
-        for string, open_note in enumerate(self.STANDARD_TUNING):
-            fret = midi_note - open_note
-            if 0 <= fret <= self.frets:
-                positions.append((string, fret))
-        return positions
-    
-    def show_note(self, midi_note: int):
-        """Highlight a MIDI note on the fretboard"""
-        self.clear_notes()
-        positions = self.midi_to_fretboard(midi_note)
-        
-        # Show all possible positions for this note
-        for string, fret in positions:
-            self.active_notes.add((string, fret))
-            self._draw_note(string, fret, active=True)
-    
+        for fret in [12, 24]:
+            if fret <= self.frets:
+                x = 45 + fret * self.fret_spacing - self.fret_spacing // 2
+                marker_y1 = 25 + self.string_spacing * 1.5
+                marker_y2 = 25 + self.string_spacing * 3.5
+                self.create_oval(x - 4, marker_y1 - 4, x + 4, marker_y1 + 4,
+                               fill="#555", outline="")
+                self.create_oval(x - 4, marker_y2 - 4, x + 4, marker_y2 + 4,
+                               fill="#555", outline="")
+
+        # Draw strings - top to bottom: E4(thin) -> E2(thick)
+        for s in range(6):
+            y = 25 + s * self.string_spacing
+            x_start = 45
+            x_end = 45 + self.frets * self.fret_spacing
+
+            # s=0 is top (E4, thinnest), s=5 is bottom (E2, thickest)
+            thickness = 1 + s * 0.4
+            self.create_line(x_start, y, x_end, y, width=thickness, fill="#c0c0c0")
+
+            self.create_text(18, y, text=self.STRING_NAMES_TOP_TO_BOTTOM[s],
+                           font=("Arial", 9), fill="#888")
+
+        # Fret numbers
+        for fret in range(self.frets + 1):
+            if fret > 0:
+                x = 45 + fret * self.fret_spacing - self.fret_spacing // 2
+                self.create_text(x, 25 + self.string_spacing * 5 + 15, 
+                               text=str(fret), font=("Arial", 9), fill="#666")
+
     def clear_notes(self):
-        """Clear all active notes"""
+        """Clear all active notes."""
         self.delete("note")
         self.active_notes.clear()
 
+    def midi_to_fretboard(self, midi_note: int) -> List[Tuple[int, int]]:
+        """Convert MIDI note to possible (string_idx, fret) positions.
+        
+        Returns positions where string_idx 0 = low E (bottom), 5 = high E (top).
+        """
+        positions = []
+        for string_idx, open_note in enumerate(self.STANDARD_TUNING):
+            fret = midi_note - open_note
+            if 0 <= fret <= self.frets:
+                positions.append((string_idx, fret))
+        return positions
+
+    def show_note(self, midi_note: int):
+        """Highlight a MIDI note on the fretboard."""
+        self.clear_notes()
+        positions = self.midi_to_fretboard(midi_note)
+        
+        for string_idx, fret in positions:
+            self.active_notes.add((string_idx, fret))
+            self._draw_note(string_idx, fret)
+
+    def _draw_note(self, string_idx: int, fret: int):
+        """Draw a note marker at position.
+        
+        string_idx: 0=low E (display at bottom), 5=high E (display at top)
+        """
+        if fret < 0 or fret > self.frets:
+            return
+        if string_idx < 0 or string_idx >= 6:
+            return
+
+        # Convert string index to display row (inverted)
+        # string_idx 0 (low E) -> display row 5 (bottom)
+        # string_idx 5 (high E) -> display row 0 (top)
+        display_idx = 5 - string_idx
+        
+        y = 25 + display_idx * self.string_spacing
+        
+        if fret == 0:
+            x = 45
+        else:
+            x = 45 + fret * self.fret_spacing - self.fret_spacing // 2
+
+        self.create_oval(
+            x - self.dot_radius, y - self.dot_radius,
+            x + self.dot_radius, y + self.dot_radius,
+            fill="#ff6b6b", outline="#ff4444", width=2, tags="note"
+        )
+
+
+# ============================
+# MAIN APPLICATION
+# ============================
 
 class NoteInferenceGUI:
-    """Main GUI application for real-time note inference"""
+    """Main GUI application for real-time note inference."""
     
     def __init__(self, root):
         self.root = root
-        self.root.title("FretListener - Real-time Note Inference")
+        self.root.title(f"FretListener v{VERSION} - Real-time Note Inference")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Configure style for dark mode compatibility
-        self.setup_styles()
+        self.root.configure(bg="#1e1e1e")
         
         # Parameter descriptions for tooltips
         self.param_descriptions = {
@@ -167,18 +288,40 @@ class NoteInferenceGUI:
             'sweep_step_ms': 'Step size when searching for best inference window\nSmaller = more accurate but slower',
             'margin': 'Required confidence gap between top 2 predictions\nHigher = more certain, but may miss ambiguous notes',
             'topk': 'Number of top candidate notes to display in debug output',
-            'block_size': 'Audio buffer size in samples\nLarger = more stable but higher latency',
             'save_dir': 'Directory to save captured WAV files for analysis',
             'filter': 'Analyzes audio features to reject non-picked sounds:\n- Finger slides (poor harmonics)\n- Muted notes (weak attack)\n- Silence or noise'
         }
         
         # State
-        self.inference_thread = None
         self.is_running = False
-        self.message_queue = queue.Queue()
+        self.stream: Optional[sd.InputStream] = None
+        self.output_stream: Optional[sd.OutputStream] = None
         self.state = None
         
-        # Default parameters matching command line defaults
+        # Thread-safe communication
+        self.audio_queue = queue.Queue()
+        self.message_queue = queue.Queue()
+        
+        # Audio monitoring
+        self.monitor_enabled = True
+        self.monitor_audio = None
+        self._stopping = False
+        
+        # Audio devices
+        self.device_list: List[Tuple[int, str]] = []
+        self.channel_list: List[int] = []
+        
+        # Capture state
+        self.capture_state = {
+            'mode': 'stopped',  # stopped, armed, capturing, waiting_silence
+            'pre_buffer': None,
+            'pre_idx': 0,
+            'recording_parts': [],
+            'recorded_post': 0,
+            'silence_ctr': 0,
+        }
+        
+        # Default parameters
         self.params = {
             'checkpoint': 'artifacts/models/note_20251211_164726/note_cnn_best.pt',
             'trigger_threshold': 0.01,
@@ -187,7 +330,6 @@ class NoteInferenceGUI:
             'silence_threshold': 0.006,
             'min_silence_ms': 80.0,
             'sweep_step_ms': 5.0,
-            'block_size': 512,
             'margin': 0.10,
             'topk': 5,
             'save_dir': 'artifacts/captures',
@@ -195,441 +337,409 @@ class NoteInferenceGUI:
             'channel_idx': 0
         }
         
-        self.setup_ui()
-        self.update_message_display()
+        self._setup_ui()
+        self._refresh_devices()
+        self._update_message_display()
     
-    def setup_styles(self):
-        """Configure styles for better macOS compatibility"""
-        # Define button styling for native tk buttons
-        self.button_style = {
-            'bg': '#f0f0f0',
-            'fg': 'black',
-            'activebackground': '#e0e0e0',
-            'activeforeground': 'black',
-            'highlightbackground': '#f0f0f0',
-            'borderwidth': 1,
-            'relief': tk.RAISED,
-            'padx': 16,   # was 10
-            'pady': 10,   # was 5
-            'font': ('Arial', 12)  # was 11
-        }
+    def _setup_ui(self):
+        """Set up the modern dark-mode UI."""
+        style = ttk.Style()
+        style.theme_use('clam')
         
-        self.button_disabled_style = {
-            'bg': '#f5f5f5',
-            'fg': '#808080'
-        }
+        # Color scheme
+        bg_dark = "#1e1e1e"
+        bg_mid = "#2d2d2d"
+        fg = "#e0e0e0"
+        fg_dim = "#888888"
+        accent = "#4fc3f7"
         
-    def create_tooltip(self, widget, text):
-        def destroy_tooltip(_=None):
-            if hasattr(widget, "tooltip") and widget.tooltip is not None:
-                try:
-                    widget.tooltip.destroy()
-                except Exception:
-                    pass
-                widget.tooltip = None
-
-        def on_enter(event):
-            destroy_tooltip()
-
-            tip = tk.Toplevel(self.root)  # parent to root explicitly
-            tip.wm_overrideredirect(True)
-
-            # Important: don't let tooltip take focus
-            try:
-                tip.wm_attributes("-topmost", True)
-            except Exception:
-                pass
-
-            x = event.x_root + 10
-            y = event.y_root + 10
-            tip.wm_geometry(f"+{x}+{y}")
-
-            label = tk.Label(
-                tip,
-                text=text,
-                font=("Arial", 10),
-                background="lightyellow",
-                foreground="black",
-                relief="solid",
-                borderwidth=1,
-                padx=8,
-                pady=6,
-                justify=tk.LEFT,
-            )
-            label.pack()
-
-            # If tooltip exists, it must not intercept future clicks
-            tip.bind("<ButtonPress>", destroy_tooltip)
-            tip.bind("<FocusOut>", destroy_tooltip)
-
-            widget.tooltip = tip
-
-        def on_leave(event):
-            destroy_tooltip()
-
-        widget.bind("<Enter>", on_enter)
-        widget.bind("<Leave>", on_leave)
-
-        # Kill tooltip on any click of the widget as well
-        widget.bind("<ButtonPress>", destroy_tooltip, add="+")
-
-    
-    def setup_ui(self):
-        """Create the GUI layout"""
+        style.configure(".", background=bg_dark, foreground=fg)
+        style.configure("TFrame", background=bg_dark)
+        style.configure("TLabel", background=bg_dark, foreground=fg)
+        style.configure("TLabelframe", background=bg_dark, foreground=fg)
+        style.configure("TLabelframe.Label", background=bg_dark, foreground=accent)
         
+        # Combobox colors
+        style.map('TCombobox', 
+                  fieldbackground=[('readonly', bg_mid)],
+                  foreground=[('readonly', fg)],
+                  selectbackground=[('readonly', bg_mid)],
+                  selectforeground=[('readonly', fg)])
+        style.configure("TCombobox", fieldbackground=bg_mid, foreground=fg, background=bg_mid)
+        
+        style.configure("TEntry", fieldbackground=bg_mid, foreground=fg)
+        style.configure("TSpinbox", fieldbackground=bg_mid, foreground=fg)
+        
+        # Progress bar / Scale
+        style.configure("Accent.Horizontal.TScale",
+                       troughcolor=bg_mid,
+                       background=accent)
+        
+        # Button styles
+        style.configure("Start.TButton", 
+                       font=("Arial", 14, "bold"),
+                       padding=(20, 15))
+        style.configure("Stop.TButton",
+                       font=("Arial", 14, "bold"),
+                       padding=(20, 15))
+        style.configure("Action.TButton",
+                       font=("Arial", 11),
+                       padding=(15, 10))
+
         # Main container
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Configure grid weights
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=2)
-        
-        # LEFT PANEL - Parameters
-        left_panel = ttk.LabelFrame(main_frame, text="Configuration", padding="10")
-        left_panel.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
-        
+        main = ttk.Frame(self.root, padding="15")
+        main.pack(fill="both", expand=True)
+
+        # === LEFT COLUMN: Config + Controls ===
+        left_col = ttk.Frame(main)
+        left_col.pack(side="left", fill="y", padx=(0, 15))
+
         # Model section
-        ttk.Label(left_panel, text="Model", font=("Arial", 10, "bold")).grid(row=0, column=0, columnspan=3, pady=(0, 5))
+        model_frame = ttk.LabelFrame(left_col, text="Model", padding="10")
+        model_frame.pack(fill="x", pady=(0, 10))
         
-        ttk.Label(left_panel, text="Checkpoint:").grid(row=1, column=0, sticky=tk.W)
+        ttk.Label(model_frame, text="Checkpoint:").pack(anchor="w")
         self.checkpoint_var = tk.StringVar(value=self.params['checkpoint'])
-        checkpoint_entry = tk.Entry(left_panel, textvariable=self.checkpoint_var, width=30,
-                                   bg='white', fg='black', insertbackground='black')
-        checkpoint_entry.grid(row=1, column=1, padx=5)
-        tk.Button(left_panel, text="Browse", command=self.browse_checkpoint,
-                 **self.button_style).grid(row=1, column=2)
         
+        ckpt_frame = ttk.Frame(model_frame)
+        ckpt_frame.pack(fill="x", pady=(2, 0))
+        
+        ckpt_entry = ttk.Entry(ckpt_frame, textvariable=self.checkpoint_var, width=30)
+        ckpt_entry.pack(side="left", fill="x", expand=True)
+        
+        ttk.Button(ckpt_frame, text="Browse", 
+                  command=self._browse_checkpoint,
+                  style="Action.TButton").pack(side="left", padx=(5, 0))
+
         # Audio Device section
-        ttk.Label(left_panel, text="Audio Input", font=("Arial", 10, "bold")).grid(row=2, column=0, columnspan=3, pady=(15, 5))
-        
-        ttk.Label(left_panel, text="Device:").grid(row=3, column=0, sticky=tk.W)
+        device_frame = ttk.LabelFrame(left_col, text="Audio Device", padding="10")
+        device_frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(device_frame, text="Device:").pack(anchor="w")
         self.device_var = tk.StringVar()
-        self.device_list = []
-        self.device_menu = tk.OptionMenu(left_panel, self.device_var, "")
-        self.device_menu.config(width=25, bg='white', fg='black', 
-                               activebackground='#e0e0e0', activeforeground='black',
-                               highlightbackground='white')
-        self.device_menu.grid(row=3, column=1, padx=5, sticky=tk.W)
-        self.device_var.trace('w', lambda *args: self.on_device_selected())
-        
-        ttk.Label(left_panel, text="Channel:").grid(row=4, column=0, sticky=tk.W)
+        self.device_combo = ttk.Combobox(device_frame, textvariable=self.device_var, 
+                                         state="readonly", width=30)
+        self.device_combo.pack(fill="x", pady=(2, 8))
+        self.device_combo.bind("<<ComboboxSelected>>", lambda e: self._on_device_selected())
+
+        ttk.Label(device_frame, text="Channel:").pack(anchor="w")
         self.channel_var = tk.StringVar()
-        self.channel_list = []
-        self.channel_menu = tk.OptionMenu(left_panel, self.channel_var, "")
-        self.channel_menu.config(width=25, bg='white', fg='black',
-                                activebackground='#e0e0e0', activeforeground='black',
-                                highlightbackground='white')
-        self.channel_menu.grid(row=4, column=1, padx=5, sticky=tk.W)
-        
-        tk.Button(left_panel, text="Refresh Devices", command=self.refresh_devices,
-                 **self.button_style).grid(row=3, column=2)
-        
-        # Trigger Parameters section
-        trigger_header_frame = ttk.Frame(left_panel)
-        trigger_header_frame.grid(row=5, column=0, columnspan=3, pady=(15, 5))
-        
-        ttk.Label(trigger_header_frame, text="Trigger Settings", 
-                 font=("Arial", 10, "bold")).pack(side=tk.LEFT)
-        
-        help_button = tk.Button(trigger_header_frame, text="?", 
-                              font=("Arial", 9, "bold"),
-                              bg="#4a90e2", fg="white",
-                              width=2, height=1,
-                              relief=tk.RAISED, borderwidth=1)
-        help_button.pack(side=tk.LEFT, padx=10)
-        self.create_tooltip(help_button, "Hover over any parameter label to see its description")
-        
-        params_frame = ttk.Frame(left_panel)
-        params_frame.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E))
+        self.channel_combo = ttk.Combobox(device_frame, textvariable=self.channel_var,
+                                          state="readonly", width=30)
+        self.channel_combo.pack(fill="x", pady=(2, 8))
+
+        ttk.Button(device_frame, text="Refresh", 
+                  command=self._refresh_devices,
+                  style="Action.TButton").pack(anchor="e", pady=(5, 0))
+
+        # Trigger Settings
+        trigger_frame = ttk.LabelFrame(left_col, text="Trigger Settings", padding="10")
+        trigger_frame.pack(fill="x", pady=(0, 10))
         
         self.param_vars = {}
         param_config = [
-            ('trigger_threshold', 'Trigger Threshold:', 0.001, 0.1, 0.001),
-            ('pre_ms', 'Pre-trigger (ms):', 0, 200, 10),
-            ('post_ms', 'Post-trigger (ms):', 100, 2000, 50),
-            ('silence_threshold', 'Silence Threshold:', 0.001, 0.05, 0.001),
-            ('min_silence_ms', 'Min Silence (ms):', 10, 500, 10),
-            ('sweep_step_ms', 'Sweep Step (ms):', 1, 50, 1),
-            ('margin', 'Confidence Margin:', 0.0, 0.5, 0.01),
+            ('trigger_threshold', 'Trigger:', 0.001, 0.1, 0.001),
+            ('pre_ms', 'Pre (ms):', 0, 200, 10),
+            ('post_ms', 'Post (ms):', 100, 2000, 50),
+            ('silence_threshold', 'Silence:', 0.001, 0.05, 0.001),
+            ('min_silence_ms', 'Re-arm (ms):', 10, 500, 10),
+            ('sweep_step_ms', 'Sweep (ms):', 1, 50, 1),
+            ('margin', 'Margin:', 0.0, 0.5, 0.01),
         ]
         
-        for i, (key, label, min_val, max_val, step) in enumerate(param_config):
-            label_widget = ttk.Label(params_frame, text=label)
-            label_widget.grid(row=i, column=0, sticky=tk.W, pady=2)
+        for key, label, min_val, max_val, step in param_config:
+            row = ttk.Frame(trigger_frame)
+            row.pack(fill="x", pady=2)
             
-            # Add tooltip to label
+            lbl = ttk.Label(row, text=label, width=10)
+            lbl.pack(side="left")
             if key in self.param_descriptions:
-                self.create_tooltip(label_widget, self.param_descriptions[key])
+                self._create_tooltip(lbl, self.param_descriptions[key])
             
             var = tk.DoubleVar(value=self.params[key])
             self.param_vars[key] = var
             
-            slider = ttk.Scale(params_frame, from_=min_val, to=max_val, 
-                              variable=var, orient=tk.HORIZONTAL, length=200)
-            slider.grid(row=i, column=1, padx=5, pady=2)
+            slider = ttk.Scale(row, from_=min_val, to=max_val, 
+                              variable=var, orient=tk.HORIZONTAL, length=150)
+            slider.pack(side="left", padx=5)
             
-            value_label = ttk.Label(params_frame, text=f"{var.get():.3f}", width=8)
-            value_label.grid(row=i, column=2, padx=5)
+            value_label = ttk.Label(row, text=f"{var.get():.3f}", width=7)
+            value_label.pack(side="left")
             
-            # Update label when slider moves
             def make_update_func(v, l):
                 return lambda *args: l.config(text=f"{v.get():.3f}")
             var.trace_add('write', make_update_func(var, value_label))
 
-        # Other settings
-        ttk.Label(left_panel, text="Other Settings", font=("Arial", 10, "bold")).grid(row=7, column=0, columnspan=3, pady=(15, 5))
+        # Other Settings
+        other_frame = ttk.LabelFrame(left_col, text="Other Settings", padding="10")
+        other_frame.pack(fill="x", pady=(0, 10))
         
-        other_frame = ttk.Frame(left_panel)
-        other_frame.grid(row=8, column=0, columnspan=3, sticky=(tk.W, tk.E))
-        
-        topk_label = ttk.Label(other_frame, text="Top-K:")
-        topk_label.grid(row=0, column=0, sticky=tk.W)
-        self.create_tooltip(topk_label, self.param_descriptions['topk'])
-        
+        # Top-K
+        topk_row = ttk.Frame(other_frame)
+        topk_row.pack(fill="x", pady=2)
+        ttk.Label(topk_row, text="Top-K:").pack(side="left")
         self.topk_var = tk.IntVar(value=self.params['topk'])
-        tk.Spinbox(other_frame, from_=1, to=10, textvariable=self.topk_var, width=10,
-                  bg='white', fg='black', insertbackground='black').grid(row=0, column=1, padx=5)
+        ttk.Spinbox(topk_row, from_=1, to=10, textvariable=self.topk_var, width=8).pack(side="left", padx=5)
         
-        block_label = ttk.Label(other_frame, text="Block Size:")
-        block_label.grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.create_tooltip(block_label, self.param_descriptions['block_size'])
-        
-        self.blocksize_var = tk.IntVar(value=self.params['block_size'])
-        tk.Spinbox(other_frame, from_=128, to=2048, increment=128, 
-                  textvariable=self.blocksize_var, width=10,
-                  bg='white', fg='black', insertbackground='black').grid(row=1, column=1, padx=5)
-        
-        save_label = ttk.Label(other_frame, text="Save Dir:")
-        save_label.grid(row=2, column=0, sticky=tk.W, pady=5)
-        self.create_tooltip(save_label, self.param_descriptions['save_dir'])
-        
+        # Save directory
+        save_row = ttk.Frame(other_frame)
+        save_row.pack(fill="x", pady=2)
+        ttk.Label(save_row, text="Save Dir:").pack(side="left")
         self.save_dir_var = tk.StringVar(value=self.params['save_dir'])
-        tk.Entry(other_frame, textvariable=self.save_dir_var, width=20,
-                bg='white', fg='black', insertbackground='black').grid(row=2, column=1, padx=5)
+        ttk.Entry(save_row, textvariable=self.save_dir_var, width=20).pack(side="left", padx=5)
         
         self.save_enabled_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(other_frame, text="Save WAVs", 
-                      variable=self.save_enabled_var,
-                      bg='#f9f9f9', fg='black', activebackground='#f0f0f0',
-                      selectcolor='white').grid(row=2, column=2, padx=5)
-        
-        # Filter settings
-        ttk.Label(left_panel, text="Note Filtering", font=("Arial", 10, "bold")).grid(row=9, column=0, columnspan=3, pady=(15, 5))
-        
-        filter_frame = ttk.Frame(left_panel)
-        filter_frame.grid(row=10, column=0, columnspan=3, sticky=(tk.W, tk.E))
-        
-        self.filter_enabled_var = tk.BooleanVar(value=False)  # Start disabled by default
-        filter_checkbox = tk.Checkbutton(filter_frame, text="Enable filter (experimental)", 
-                      variable=self.filter_enabled_var,
-                      bg='#f9f9f9', fg='black', activebackground='#f0f0f0',
-                      selectcolor='white', font=("Arial", 10, "bold"),
-                      command=self.on_filter_toggle)
-        filter_checkbox.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=5)
-        self.create_tooltip(filter_checkbox, self.param_descriptions['filter'])
-        
-        ttk.Label(filter_frame, text="(Attempts to reject slides and muted notes)", 
-                 font=("Arial", 9, "italic")).grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=20)
-        
-        # Advanced filter settings (initially hidden)
-        self.filter_advanced_frame = ttk.Frame(filter_frame)
-        # Don't grid it initially - will be shown when filter is enabled
-        
-        ttk.Label(self.filter_advanced_frame, text="Filter Thresholds:", 
-                 font=("Arial", 9, "bold")).grid(row=0, column=0, columnspan=2, pady=(5, 3))
-        
-        # Filter threshold controls
-        self.filter_min_rms = tk.DoubleVar(value=0.0005)
-        ttk.Label(self.filter_advanced_frame, text="Min RMS:", font=("Arial", 9)).grid(row=1, column=0, sticky=tk.W, padx=(10, 5))
-        rms_spin = tk.Spinbox(self.filter_advanced_frame, from_=0.0001, to=0.01, increment=0.0001, 
-                             textvariable=self.filter_min_rms, width=8, format="%.4f",
-                             bg='white', fg='black', font=("Arial", 9))
-        rms_spin.grid(row=1, column=1, padx=5)
-        self.create_tooltip(rms_spin, "Minimum RMS energy\nLower = accepts quieter sounds")
-        
-        self.filter_min_peak_ratio = tk.DoubleVar(value=2.0)
-        ttk.Label(self.filter_advanced_frame, text="Min Peak/RMS:", font=("Arial", 9)).grid(row=2, column=0, sticky=tk.W, padx=(10, 5))
-        peak_spin = tk.Spinbox(self.filter_advanced_frame, from_=1.5, to=5.0, increment=0.1, 
-                              textvariable=self.filter_min_peak_ratio, width=8, format="%.1f",
-                              bg='white', fg='black', font=("Arial", 9))
-        peak_spin.grid(row=2, column=1, padx=5)
-        self.create_tooltip(peak_spin, "Minimum peak-to-RMS ratio\nLower = accepts softer attacks")
-        
-        self.filter_min_harmonics = tk.DoubleVar(value=0.1)
-        ttk.Label(self.filter_advanced_frame, text="Min Harmonics:", font=("Arial", 9)).grid(row=3, column=0, sticky=tk.W, padx=(10, 5))
-        harm_spin = tk.Spinbox(self.filter_advanced_frame, from_=0.0, to=0.5, increment=0.05, 
-                              textvariable=self.filter_min_harmonics, width=8, format="%.2f",
-                              bg='white', fg='black', font=("Arial", 9))
-        harm_spin.grid(row=3, column=1, padx=5)
-        self.create_tooltip(harm_spin, "Minimum harmonic strength\nLower = accepts noisier sounds")
-        
-        # Control buttons
-        control_frame = ttk.Frame(left_panel)
-        control_frame.grid(row=11, column=0, columnspan=3, pady=30)
-        
-        self.start_button = tk.Button(control_frame, text="Start", command=self.start_inference,
-                                      **self.button_style)
-        self.start_button.grid(row=0, column=0, padx=5)
-        
-        self.stop_button = tk.Button(control_frame, text="Stop", command=self.stop_inference,
-                                     **self.button_style)
-        self.stop_button.config(state="disabled")
-        self.stop_button.grid(row=0, column=1, padx=5)
-        
-        self.start_button.config(width=10)
-        self.stop_button.config(width=10)
+        ttk.Checkbutton(save_row, text="Save", variable=self.save_enabled_var).pack(side="left")
 
-        # RIGHT PANEL - Visualization
-        right_panel = ttk.Frame(main_frame)
-        right_panel.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
-        right_panel.columnconfigure(0, weight=1)
+        # Audio Monitor
+        monitor_frame = ttk.LabelFrame(left_col, text="Audio Monitor", padding="10")
+        monitor_frame.pack(fill="x", pady=(0, 10))
         
-        # Fretboard
-        fretboard_frame = ttk.LabelFrame(right_panel, text="Guitar Fretboard (Frets 0-7)")
-        fretboard_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.monitor_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(monitor_frame, text="Enable monitoring (hear input)", 
+                       variable=self.monitor_var,
+                       command=self._sync_monitor_enabled).pack(anchor="w")
+
+        # Filter settings
+        filter_frame = ttk.LabelFrame(left_col, text="Note Filtering", padding="10")
+        filter_frame.pack(fill="x", pady=(0, 10))
         
-        self.fretboard = GuitarFretboard(fretboard_frame, frets=7, bg="white", 
-                                        highlightthickness=1, highlightbackground="#ccc")
-        self.fretboard.pack(padx=10, pady=10)
+        self.filter_enabled_var = tk.BooleanVar(value=False)
+        filter_cb = ttk.Checkbutton(filter_frame, text="Enable filter (experimental)", 
+                                   variable=self.filter_enabled_var,
+                                   command=self._on_filter_toggle)
+        filter_cb.pack(anchor="w")
+        self._create_tooltip(filter_cb, self.param_descriptions['filter'])
         
-        # Current Note Display
-        note_frame = ttk.LabelFrame(right_panel, text="Detected Note")
-        note_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        note_frame.columnconfigure(0, weight=1)
+        ttk.Label(filter_frame, text="(Rejects slides and muted notes)", 
+                 font=("Arial", 9)).pack(anchor="w", padx=20)
         
-        # Create a white background frame for the note display
-        note_bg_frame = tk.Frame(note_frame, bg="white", relief=tk.SUNKEN, borderwidth=2)
-        note_bg_frame.grid(row=0, column=0, columnspan=1, sticky=(tk.W, tk.E), padx=10, pady=10)
+        # Advanced filter settings (hidden by default)
+        self.filter_advanced_frame = ttk.Frame(filter_frame)
         
-        self.note_label = tk.Label(note_bg_frame, text="--", 
-                                  font=("Arial", 72, "bold"),
-                                  fg="#FF4444", bg="white")
-        self.note_label.pack(pady=(20, 10))
+        self.filter_min_rms = tk.DoubleVar(value=0.0005)
+        self.filter_min_peak_ratio = tk.DoubleVar(value=2.0)
+        self.filter_min_harmonics = tk.DoubleVar(value=0.1)
         
-        self.confidence_label = tk.Label(note_bg_frame, text="Confidence: --", 
-                                        font=("Arial", 16),
-                                        fg="black", bg="white")
-        self.confidence_label.pack()
+        ttk.Label(self.filter_advanced_frame, text="Min RMS:").grid(row=0, column=0, sticky="w")
+        ttk.Spinbox(self.filter_advanced_frame, from_=0.0001, to=0.01, increment=0.0001,
+                   textvariable=self.filter_min_rms, width=8).grid(row=0, column=1, padx=5)
         
-        self.midi_label = tk.Label(note_bg_frame, text="MIDI: --", 
-                                  font=("Arial", 12),
-                                  fg="black", bg="white")
-        self.midi_label.pack(pady=(5, 15))
+        ttk.Label(self.filter_advanced_frame, text="Min Peak/RMS:").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(self.filter_advanced_frame, from_=1.5, to=5.0, increment=0.1,
+                   textvariable=self.filter_min_peak_ratio, width=8).grid(row=1, column=1, padx=5)
         
-        # Debug Info
-        debug_frame = ttk.LabelFrame(right_panel, text="Debug Information")
-        debug_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        debug_frame.columnconfigure(0, weight=1)
-        debug_frame.rowconfigure(0, weight=1)
+        ttk.Label(self.filter_advanced_frame, text="Min Harmonics:").grid(row=2, column=0, sticky="w")
+        ttk.Spinbox(self.filter_advanced_frame, from_=0.0, to=0.5, increment=0.05,
+                   textvariable=self.filter_min_harmonics, width=8).grid(row=2, column=1, padx=5)
+
+        # Control buttons
+        control_frame = ttk.LabelFrame(left_col, text="Control", padding="10")
+        control_frame.pack(fill="x", pady=(0, 10))
         
-        # Use a Text widget with explicit colors for better dark mode compatibility
-        self.debug_text = scrolledtext.ScrolledText(debug_frame, height=10, width=60,
-                                                   font=("Courier", 9),
-                                                   bg="white", fg="black",
-                                                   insertbackground="black")
-        self.debug_text.grid(row=0, column=0, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.start_btn = ttk.Button(control_frame, text="START", 
+                                   command=self.start_inference,
+                                   style="Start.TButton")
+        self.start_btn.pack(fill="x", pady=(0, 8))
         
-        # Status bar
+        self.stop_btn = ttk.Button(control_frame, text="STOP",
+                                  command=self.stop_inference,
+                                  state="disabled",
+                                  style="Stop.TButton")
+        self.stop_btn.pack(fill="x")
+
+        # === RIGHT COLUMN: Display ===
+        right_col = ttk.Frame(main)
+        right_col.pack(side="left", fill="both", expand=True)
+
+        # Status Box
+        status_box = ttk.LabelFrame(right_col, text="Status", padding="10")
+        status_box.pack(fill="x", pady=(0, 10))
+        
+        status_content = ttk.Frame(status_box)
+        status_content.pack(fill="x")
+        
+        self.status_light = StatusLight(status_content, size=40, bg=bg_dark)
+        self.status_light.pack(side="left", padx=(0, 15))
+        
         self.status_var = tk.StringVar(value="Ready")
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        self.status_label = tk.Label(status_content, textvariable=self.status_var,
+                                    font=("Arial", 20, "bold"),
+                                    fg=fg, bg=bg_dark)
+        self.status_label.pack(side="left", fill="x", expand=True, anchor="w")
+
+        # Detected Note Display
+        note_frame = ttk.LabelFrame(right_col, text="Detected Note", padding="10")
+        note_frame.pack(fill="x", pady=(0, 10))
         
-        # Initialize devices
-        self.refresh_devices()
+        note_content = ttk.Frame(note_frame)
+        note_content.pack(fill="x")
         
-    def browse_checkpoint(self):
-        """Browse for checkpoint file"""
+        # Big note display
+        self.note_display_var = tk.StringVar(value="--")
+        note_label = tk.Label(note_content, textvariable=self.note_display_var,
+                             font=("Arial", 64, "bold"),
+                             fg="#ff6b6b", bg=bg_dark)
+        note_label.pack(side="left", padx=(0, 20))
+        
+        # Info frame
+        info_frame = ttk.Frame(note_content)
+        info_frame.pack(side="left", fill="y")
+        
+        self.confidence_var = tk.StringVar(value="Confidence: --")
+        ttk.Label(info_frame, textvariable=self.confidence_var,
+                 font=("Arial", 14)).pack(anchor="w")
+        
+        self.midi_var = tk.StringVar(value="MIDI: --")
+        ttk.Label(info_frame, textvariable=self.midi_var,
+                 font=("Arial", 12), foreground=fg_dim).pack(anchor="w")
+        
+        self.reason_var = tk.StringVar(value="")
+        ttk.Label(info_frame, textvariable=self.reason_var,
+                 font=("Arial", 10), foreground=fg_dim).pack(anchor="w")
+
+        # Fretboard
+        fretboard_frame = ttk.LabelFrame(right_col, text="Fretboard", padding="5")
+        fretboard_frame.pack(fill="x", pady=(0, 10))
+        
+        self.fretboard = GuitarFretboard(fretboard_frame, frets=12)
+        self.fretboard.pack()
+
+        # Debug Log
+        log_frame = ttk.LabelFrame(right_col, text="Log", padding="5")
+        log_frame.pack(fill="both", expand=True)
+        
+        self.log_text = tk.Text(log_frame, height=10, wrap="word",
+                               bg=bg_mid, fg=fg,
+                               insertbackground=fg,
+                               selectbackground=accent,
+                               font=("Consolas", 10))
+        self.log_text.pack(fill="both", expand=True, side="left")
+        
+        scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        scrollbar.pack(fill="y", side="right")
+        self.log_text.config(yscrollcommand=scrollbar.set)
+
+    def _create_tooltip(self, widget, text):
+        """Create a tooltip for a widget."""
+        def show_tooltip(event):
+            tip = tk.Toplevel(self.root)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+            
+            label = tk.Label(tip, text=text, font=("Arial", 10),
+                           background="lightyellow", foreground="black",
+                           relief="solid", borderwidth=1, padx=8, pady=6,
+                           justify=tk.LEFT)
+            label.pack()
+            
+            widget._tooltip = tip
+        
+        def hide_tooltip(event):
+            if hasattr(widget, '_tooltip') and widget._tooltip:
+                widget._tooltip.destroy()
+                widget._tooltip = None
+        
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", hide_tooltip)
+
+    def _refresh_devices(self):
+        """Refresh available audio devices."""
+        try:
+            devices = sd.query_devices()
+            self.device_list = [
+                (i, d['name'])
+                for i, d in enumerate(devices)
+                if d.get('max_input_channels', 0) > 0
+            ]
+
+            if self.device_list:
+                device_names = [name for _, name in self.device_list]
+                self.device_combo['values'] = device_names
+                self.device_combo.current(0)
+                self._on_device_selected()
+            else:
+                messagebox.showwarning("No Devices", "No audio input devices found")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to query devices: {e}")
+
+    def _on_device_selected(self):
+        """Handle device selection."""
+        try:
+            current = self.device_combo.current()
+            if current < 0 or current >= len(self.device_list):
+                return
+
+            device_idx, _ = self.device_list[current]
+            info = sd.query_devices(device_idx)
+            max_ch = int(info.get('max_input_channels', 0))
+
+            self.channel_list = list(range(max_ch))
+            channel_names = [f"Channel {i+1}" for i in range(max_ch)]
+            self.channel_combo['values'] = channel_names
+
+            if channel_names:
+                self.channel_combo.current(0)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to get device info: {e}")
+
+    def _browse_checkpoint(self):
+        """Browse for checkpoint file."""
         filename = filedialog.askopenfilename(
             title="Select checkpoint file",
             filetypes=[("PyTorch files", "*.pt"), ("All files", "*.*")]
         )
         if filename:
             self.checkpoint_var.set(filename)
-    
-    def refresh_devices(self):
-        """Refresh audio device list"""
-        try:
-            devices = sd.query_devices()
-            self.device_list = []
-            
-            for idx, device in enumerate(devices):
-                if device.get('max_input_channels', 0) > 0:
-                    device_str = f"{idx}: {device['name']} ({device['max_input_channels']} ch)"
-                    self.device_list.append(device_str)
-            
-            # Update device OptionMenu
-            menu = self.device_menu['menu']
-            menu.delete(0, 'end')
-            
-            for device in self.device_list:
-                menu.add_command(label=device, 
-                               command=tk._setit(self.device_var, device))
-            
-            if self.device_list:
-                self.device_var.set(self.device_list[0])
-                self.on_device_selected()
-                
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to get audio devices: {e}")
-    
-    def on_device_selected(self, event=None):
-        """Handle device selection"""
-        if not self.device_var.get():
-            return
-            
-        try:
-            device_idx = int(self.device_var.get().split(':')[0])
-            device_info = sd.query_devices(device_idx)
-            max_channels = device_info.get('max_input_channels', 0)
-            
-            self.channel_list = [f"Channel {i+1}" for i in range(max_channels)]
-            
-            # Update channel OptionMenu
-            menu = self.channel_menu['menu']
-            menu.delete(0, 'end')
-            
-            for channel in self.channel_list:
-                menu.add_command(label=channel,
-                               command=tk._setit(self.channel_var, channel))
-            
-            if self.channel_list:
-                self.channel_var.set(self.channel_list[0])
-                
-        except Exception as e:
-            print(f"Error updating channels: {e}")
-    
-    def update_params(self):
-        """Update parameters from GUI"""
+
+    def _sync_monitor_enabled(self):
+        """Sync monitor enabled state."""
+        self.monitor_enabled = bool(self.monitor_var.get())
+
+    def _on_filter_toggle(self):
+        """Show/hide advanced filter settings."""
+        if self.filter_enabled_var.get():
+            self.filter_advanced_frame.pack(fill="x", pady=(5, 0))
+        else:
+            self.filter_advanced_frame.pack_forget()
+
+    def _log(self, msg: str):
+        """Log a message to the debug area."""
+        self.log_text.insert("end", msg + "\n")
+        self.log_text.see("end")
+
+    def _update_params(self):
+        """Update parameters from GUI."""
         self.params['checkpoint'] = self.checkpoint_var.get()
         self.params['save_dir'] = self.save_dir_var.get() if self.save_enabled_var.get() else ""
         self.params['topk'] = self.topk_var.get()
-        self.params['block_size'] = self.blocksize_var.get()
         
         for key, var in self.param_vars.items():
             self.params[key] = var.get()
         
         # Get device and channel
-        if self.device_var.get():
-            self.params['device_idx'] = int(self.device_var.get().split(':')[0])
+        current = self.device_combo.current()
+        if current >= 0 and current < len(self.device_list):
+            self.params['device_idx'], _ = self.device_list[current]
         
-        if self.channel_var.get():
-            channel_num = self.channel_var.get().replace('Channel ', '')
-            self.params['channel_idx'] = int(channel_num) - 1
-    
+        ch_current = self.channel_combo.current()
+        if ch_current >= 0:
+            self.params['channel_idx'] = ch_current
+
     def start_inference(self):
-        """Start the inference thread"""
+        """Start the inference system."""
         if self.is_running:
             return
         
-        self.update_params()
+        self._update_params()
+        self._sync_monitor_enabled()
         
         # Validate checkpoint
         checkpoint_path = Path(self.params['checkpoint'])
         if not checkpoint_path.exists():
-            messagebox.showerror("Error", f"Checkpoint file not found: {checkpoint_path}")
+            messagebox.showerror("Error", f"Checkpoint not found: {checkpoint_path}")
             return
         
         # Validate device
@@ -638,48 +748,28 @@ class NoteInferenceGUI:
             return
         
         self.is_running = True
-        self.start_button.config(state="disabled", **self.button_disabled_style)
-        self.stop_button.config(state="normal", **self.button_style)
-        self.status_var.set("Starting inference...")
+        self._stopping = False
+        self.start_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self.status_var.set("Loading model...")
+        self.status_light.set_state("processing")
         
-        # Clear debug display
-        self.debug_text.delete(1.0, tk.END)
+        # Clear log
+        self.log_text.delete(1.0, tk.END)
         
-        # Start inference thread
-        self.inference_thread = threading.Thread(target=self.run_inference, daemon=True)
-        self.inference_thread.start()
-    
-    def stop_inference(self):
-        """Stop the inference thread"""
-        if not self.is_running:
-            return
-        
-        self.is_running = False
-        self.stop_button.config(state="disabled", **self.button_disabled_style)
-        self.status_var.set("Stopping...")
-        
-        # Wait a bit for thread to stop
-        self.root.after(500, self.on_inference_stopped)
-    
-    def on_inference_stopped(self):
-        """Called after inference stops"""
-        self.start_button.config(state="normal", **self.button_style)
-        self.status_var.set("Ready")
-        self.note_label.config(text="--")
-        self.confidence_label.config(text="Confidence: --")
-        self.midi_label.config(text="MIDI: --")
-        self.fretboard.clear_notes()
-    
-    def run_inference(self):
-        """Run the inference loop (in separate thread)"""
+        # Start in background thread
+        threading.Thread(target=self._run_inference, daemon=True).start()
+
+    def _run_inference(self):
+        """Run inference (in background thread)."""
         try:
             # Load model
-            self.send_message('status', "Loading model...")
-            model_device = self.get_model_device()
-            self.send_message('debug', f"Using compute device: {model_device}")
+            self._send_message('log', "Loading model...")
+            model_device = self._get_model_device()
+            self._send_message('log', f"Using compute device: {model_device}")
             
             checkpoint_path = Path(self.params['checkpoint'])
-            self.state = self.load_checkpoint(checkpoint_path, model_device)
+            self.state = self._load_checkpoint(checkpoint_path, model_device)
             
             sr = self.state["sample_rate"]
             attack = self.state["attack_samples"]
@@ -692,25 +782,24 @@ class NoteInferenceGUI:
             sweep_step_samples = max(1, int(round((self.params['sweep_step_ms'] / 1000.0) * sr)))
             min_silence_samples = max(1, int(round((self.params['min_silence_ms'] / 1000.0) * sr)))
             
-            self.send_message('debug', f"Model sample rate: {sr} Hz")
-            self.send_message('debug', f"Training attack window: {attack} samples ({attack/sr:.3f}s)")
-            self.send_message('debug', f"Capture: pre={pre_samples} + post={post_samples} = {capture_total} samples")
-            self.send_message('status', "Inference armed. Play notes...")
+            self._send_message('log', f"Model sample rate: {sr} Hz")
+            self._send_message('log', f"Attack window: {attack} samples ({attack/sr:.3f}s)")
+            self._send_message('log', f"Capture: pre={pre_samples} + post={post_samples}")
             
-            # Setup audio stream with callback
-            device_info = sd.query_devices(self.params['device_idx'])
+            # Get device info
+            device_idx = self.params['device_idx']
+            device_info = sd.query_devices(device_idx)
             max_channels = device_info['max_input_channels']
             ch = self.params['channel_idx']
             
-            # Shared state for callback
-            audio_state = {
+            # Initialize capture state
+            self.capture_state = {
                 'mode': 'armed',
                 'pre_buffer': np.zeros((pre_samples, max_channels), dtype=np.float32) if pre_samples > 0 else None,
                 'pre_idx': 0,
                 'recording_parts': [],
                 'recorded_post': 0,
                 'silence_ctr': 0,
-                'params': self.params,
                 'sr': sr,
                 'ch': ch,
                 'pre_samples': pre_samples,
@@ -721,92 +810,162 @@ class NoteInferenceGUI:
                 'attack': attack,
             }
             
-            def audio_callback(indata, frames, time_info, status):
-                if not self.is_running:
-                    return
-                    
-                if status:
-                    self.send_message('debug', f"Audio status: {status}")
-                
-                self.process_audio_block(indata, frames, audio_state)
+            # Initialize audio queue
+            self.audio_queue = queue.Queue()
+            self.monitor_audio = None
             
-            # Run audio stream
-            with sd.InputStream(
-                device=self.params['device_idx'],
+            # Audio callback - lightweight, just queues data
+            def audio_callback(indata, frames, time_info, status):
+                if status:
+                    print(f"Audio status: {status}")
+                
+                # Get mono channel
+                if indata.ndim == 2:
+                    mono = indata[:, ch].astype(np.float32, copy=True)
+                else:
+                    mono = indata.astype(np.float32, copy=True)
+                
+                # Update monitor buffer
+                if self.monitor_enabled:
+                    self.monitor_audio = mono
+                
+                # Queue for processing
+                self.audio_queue.put((indata.copy(), mono))
+            
+            # Output callback for monitoring
+            def output_callback(outdata, frames, time_info, status):
+                if self._stopping or not self.monitor_enabled or self.monitor_audio is None:
+                    outdata.fill(0)
+                    return
+                
+                mono = self.monitor_audio
+                n = min(len(mono), frames)
+                outdata[:n, 0] = mono[:n]
+                outdata[:n, 1] = mono[:n]
+                if n < frames:
+                    outdata[n:, :] = 0
+            
+            # Start input stream
+            self.stream = sd.InputStream(
+                device=device_idx,
                 channels=max_channels,
                 samplerate=sr,
+                blocksize=ANALYSIS_HOP,
                 dtype='float32',
-                blocksize=self.params['block_size'],
                 callback=audio_callback
-            ):
-                while self.is_running:
-                    time.sleep(0.1)
-                    
+            )
+            
+            # Start output stream for monitoring
+            if self.monitor_enabled:
+                try:
+                    self.output_stream = sd.OutputStream(
+                        samplerate=sr,
+                        blocksize=ANALYSIS_HOP,
+                        channels=2,
+                        dtype='float32',
+                        callback=output_callback
+                    )
+                    self.output_stream.start()
+                except Exception as e:
+                    self._send_message('log', f"Monitor unavailable: {e}")
+                    self.output_stream = None
+            
+            self.stream.start()
+            
+            self._send_message('status', "Armed - Play notes!")
+            self._send_message('state', 'armed')
+            
+            # Process audio from queue
+            self.root.after(10, self._process_audio_queue)
+            
         except Exception as e:
-            self.send_message('error', f"Inference error: {e}")
+            self._send_message('error', f"Failed to start: {e}")
             self.is_running = False
-    
-    def process_audio_block(self, indata, frames, audio_state):
-        """Process audio block in callback"""
-        ch = audio_state['ch']
-        chan = indata[:, ch].astype(np.float32, copy=False)
-        peak = float(np.max(np.abs(chan))) if chan.size else 0.0
+
+    def _process_audio_queue(self):
+        """Process audio data from the queue (main thread)."""
+        if not self.is_running:
+            return
         
-        if audio_state['mode'] == 'armed':
+        # Process all available chunks
+        while not self.audio_queue.empty():
+            try:
+                indata, mono = self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+            
+            self._process_audio_block(indata, mono)
+        
+        # Schedule next check
+        if self.is_running:
+            self.root.after(10, self._process_audio_queue)
+
+    def _process_audio_block(self, indata, mono):
+        """Process an audio block."""
+        cs = self.capture_state
+        peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        frames = mono.shape[0]
+        
+        if cs['mode'] == 'armed':
             # Update pre-buffer
-            if audio_state['pre_buffer'] is not None:
-                self.update_prebuffer(indata, audio_state)
+            if cs['pre_buffer'] is not None:
+                self._update_prebuffer(indata)
             
             # Check for trigger
             if peak >= self.params['trigger_threshold']:
                 # Get pre-buffer audio
-                pre_audio = self.get_prebuffer_channel(audio_state)
-                audio_state['recording_parts'] = [pre_audio, chan.astype(np.float32, copy=True)]
-                audio_state['recorded_post'] = int(chan.shape[0])
-                audio_state['mode'] = 'capturing'
+                pre_audio = self._get_prebuffer_channel()
+                cs['recording_parts'] = [pre_audio, mono.copy()]
+                cs['recorded_post'] = frames
+                cs['mode'] = 'capturing'
                 
-                self.send_message('debug', f"Triggered! Peak={peak:.4f}")
-                self.send_message('status', "Capturing...")
+                self._log(f"Triggered! Peak={peak:.4f}")
+                self.status_var.set("Capturing...")
+                self.status_light.set_state("capturing")
                 
-        elif audio_state['mode'] == 'capturing':
-            audio_state['recording_parts'].append(chan.astype(np.float32, copy=True))
-            audio_state['recorded_post'] += int(chan.shape[0])
+        elif cs['mode'] == 'capturing':
+            cs['recording_parts'].append(mono.copy())
+            cs['recorded_post'] += frames
             
-            if audio_state['recorded_post'] >= audio_state['post_samples']:
+            if cs['recorded_post'] >= cs['post_samples']:
+                # Assemble captured audio
+                cap = np.concatenate(cs['recording_parts']).astype(np.float32)
+                
+                # Trim/pad to exact size
+                if cap.shape[0] > cs['capture_total']:
+                    cap = cap[:cs['capture_total']]
+                elif cap.shape[0] < cs['capture_total']:
+                    cap = np.pad(cap, (0, cs['capture_total'] - cap.shape[0]), mode='constant')
+                
                 # Process captured audio
-                cap = np.concatenate(audio_state['recording_parts']).astype(np.float32, copy=False)
+                self.status_var.set("Processing...")
+                self.status_light.set_state("processing")
+                self._process_captured_audio(cap)
                 
-                if cap.shape[0] > audio_state['capture_total']:
-                    cap = cap[:audio_state['capture_total']]
-                elif cap.shape[0] < audio_state['capture_total']:
-                    cap = np.pad(cap, (0, audio_state['capture_total'] - cap.shape[0]), mode='constant')
+                cs['mode'] = 'waiting_silence'
+                cs['silence_ctr'] = 0
                 
-                # Run inference
-                self.process_captured_audio(cap, audio_state)
-                
-                audio_state['mode'] = 'waiting_silence'
-                audio_state['silence_ctr'] = 0
-                
-        elif audio_state['mode'] == 'waiting_silence':
+        elif cs['mode'] == 'waiting_silence':
             if peak <= self.params['silence_threshold']:
-                audio_state['silence_ctr'] += frames
+                cs['silence_ctr'] += frames
             else:
-                audio_state['silence_ctr'] = 0
+                cs['silence_ctr'] = 0
             
-            if audio_state['silence_ctr'] >= audio_state['min_silence_samples']:
-                self.send_message('debug', "Silence detected, re-arming")
-                self.send_message('status', "Armed")
-                audio_state['mode'] = 'armed'
-                audio_state['silence_ctr'] = 0
-                audio_state['recording_parts'] = []
-                audio_state['recorded_post'] = 0
-                audio_state['pre_idx'] = 0
-    
-    def update_prebuffer(self, block, audio_state):
-        """Update circular pre-buffer"""
-        pre_buffer = audio_state['pre_buffer']
-        pre_samples = audio_state['pre_samples']
-        pre_idx = audio_state['pre_idx']
+            if cs['silence_ctr'] >= cs['min_silence_samples']:
+                self._log("Re-armed")
+                self.status_var.set("Armed")
+                self.status_light.set_state("armed")
+                cs['mode'] = 'armed'
+                cs['recording_parts'] = []
+                cs['recorded_post'] = 0
+                cs['pre_idx'] = 0
+
+    def _update_prebuffer(self, block):
+        """Update circular pre-buffer."""
+        cs = self.capture_state
+        pre_buffer = cs['pre_buffer']
+        pre_samples = cs['pre_samples']
+        pre_idx = cs['pre_idx']
         
         frames = block.shape[0]
         if frames <= 0:
@@ -818,21 +977,22 @@ class NoteInferenceGUI:
         
         end = pre_idx + frames
         if end <= pre_samples:
-            pre_buffer[pre_idx:end, :] = block.astype(np.float32, copy=False)
+            pre_buffer[pre_idx:end, :] = block.astype(np.float32)
         else:
             first = pre_samples - pre_idx
-            pre_buffer[pre_idx:, :] = block[:first].astype(np.float32, copy=False)
+            pre_buffer[pre_idx:, :] = block[:first].astype(np.float32)
             remaining = frames - first
-            pre_buffer[:remaining, :] = block[first:].astype(np.float32, copy=False)
+            pre_buffer[:remaining, :] = block[first:].astype(np.float32)
         
-        audio_state['pre_idx'] = (pre_idx + frames) % pre_samples
-    
-    def get_prebuffer_channel(self, audio_state):
-        """Get pre-buffer for selected channel"""
-        pre_buffer = audio_state['pre_buffer']
-        ch = audio_state['ch']
-        pre_samples = audio_state['pre_samples']
-        pre_idx = audio_state['pre_idx']
+        cs['pre_idx'] = (pre_idx + frames) % pre_samples
+
+    def _get_prebuffer_channel(self):
+        """Get pre-buffer for selected channel."""
+        cs = self.capture_state
+        pre_buffer = cs['pre_buffer']
+        ch = cs['ch']
+        pre_samples = cs['pre_samples']
+        pre_idx = cs['pre_idx']
         
         if pre_buffer is None or pre_samples <= 0:
             return np.zeros((0,), dtype=np.float32)
@@ -843,316 +1003,269 @@ class NoteInferenceGUI:
         return np.concatenate([
             pre_buffer[pre_idx:, ch],
             pre_buffer[:pre_idx, ch]
-        ]).astype(np.float32, copy=True)
-    
-    def analyze_audio_features(self, audio, sr):
-        """Analyze audio features to determine if it's a picked note
+        ]).astype(np.float32)
+
+    def _process_captured_audio(self, captured):
+        """Process captured audio and run inference."""
+        cs = self.capture_state
         
-        Returns: (is_picked_note, features_dict)
-        """
+        # Apply filter if enabled
+        if self.filter_enabled_var.get():
+            is_picked, features = self._analyze_audio_features(captured, cs['sr'])
+            
+            feature_msg = f"RMS={features['rms']:.4f}, Peak/RMS={features['peak_to_rms']:.1f}, "
+            feature_msg += f"Harmonics={features['harmonic_strength']:.2f}"
+            self._log(feature_msg)
+            
+            if not is_picked:
+                self._log(f"FILTERED: {', '.join(features['rejection_reasons'])}")
+                self.status_var.set("Filtered")
+                return
+        
+        # Sweep for best window
+        best_start, best_window, best_topk = self._sweep_best_window(
+            captured=captured,
+            sweep_step_samples=cs['sweep_step_samples'],
+            topk=max(2, self.params['topk'])
+        )
+        
+        if not best_topk:
+            self._log("No candidates found")
+            return
+        
+        # Decide with margin check
+        midi, name, prob, reason, was_ambiguous, f0_hz = self._decide_with_margin_and_pitch(
+            best_window=best_window,
+            best_topk=best_topk,
+            sr=cs['sr'],
+            margin=self.params['margin']
+        )
+        
+        # Update display
+        self.note_display_var.set(name)
+        self.confidence_var.set(f"Confidence: {prob:.3f}")
+        self.midi_var.set(f"MIDI: {midi}")
+        self.reason_var.set(reason if was_ambiguous else "")
+        
+        self.fretboard.show_note(midi)
+        self.status_light.set_state("detected")
+        
+        # Log top candidates
+        topk_str = ", ".join([f"{n}({p:.2f})" for m, n, p in best_topk[:self.params['topk']]])
+        self._log(f"Detected: {name} @ {prob:.3f} | Top-K: {topk_str}")
+        
+        # Save if enabled
+        if self.params['save_dir']:
+            self._save_captured_audio(captured, best_window, name, prob)
+
+    def _analyze_audio_features(self, audio, sr):
+        """Analyze audio to determine if it's a picked note."""
         features = {}
         
-        # 1. Check for sufficient energy (not silence)
         rms = np.sqrt(np.mean(audio ** 2))
         features['rms'] = float(rms)
         
-        # 2. Peak-to-RMS ratio (picked notes have sharp attacks)
         peak = float(np.max(np.abs(audio)))
         features['peak'] = peak
         features['peak_to_rms'] = peak / rms if rms > 1e-6 else 0
         
-        # 3. Zero crossing rate (picked notes have more periodic ZCR)
+        # Zero crossing rate
         zcr = np.sum(np.abs(np.diff(np.sign(audio)))) / (2 * len(audio))
         features['zcr'] = float(zcr)
         
-        # 4. Spectral centroid (finger slides have different frequency distribution)
-        fft = np.abs(np.fft.rfft(audio))
-        freqs = np.fft.rfftfreq(len(audio), 1/sr)
-        
-        if np.sum(fft) > 0:
-            spectral_centroid = np.sum(freqs * fft) / np.sum(fft)
-            features['spectral_centroid'] = float(spectral_centroid)
-        else:
-            features['spectral_centroid'] = 0
-        
-        # 5. Attack detection - measure energy in first 30ms vs next 30ms
-        attack_samples = int(0.03 * sr)  # 30ms windows
+        # Attack ratio
+        attack_samples = int(0.03 * sr)
         if len(audio) > attack_samples * 2:
             early_energy = np.mean(audio[:attack_samples] ** 2)
             later_energy = np.mean(audio[attack_samples:attack_samples*2] ** 2)
-            # For picked notes, later energy should typically be lower than early (decay)
-            # But allow for sustain - just check it's not growing too much
             features['attack_ratio'] = float(later_energy / early_energy) if early_energy > 1e-6 else 1.0
         else:
             features['attack_ratio'] = 1.0
         
-        # 6. Simplified harmonic check - just check for some periodicity
-        if len(audio) > sr // 50:  # At least 20ms of audio
-            # Simple autocorrelation peak check
+        # Harmonic strength
+        features['harmonic_strength'] = 0
+        if len(audio) > sr // 50:
             norm_audio = audio - np.mean(audio)
             if np.std(norm_audio) > 0:
                 norm_audio = norm_audio / np.std(norm_audio)
-                
-                # Just check for ANY significant autocorrelation peak
-                min_lag = int(sr / 1200)  # 1200 Hz max
-                max_lag = min(int(sr / 50), len(norm_audio) // 2)  # 50 Hz min
+                min_lag = int(sr / 1200)
+                max_lag = min(int(sr / 50), len(norm_audio) // 2)
                 
                 if max_lag > min_lag:
                     autocorr = np.correlate(norm_audio, norm_audio, mode='full')
-                    autocorr = autocorr[len(autocorr)//2:]  # Take positive lags
-                    
-                    # Normalize by zero-lag value
+                    autocorr = autocorr[len(autocorr)//2:]
                     if autocorr[0] > 0:
                         autocorr = autocorr / autocorr[0]
-                    
                     if max_lag < len(autocorr) and min_lag < len(autocorr):
                         autocorr_range = autocorr[min_lag:max_lag]
                         if len(autocorr_range) > 0:
                             features['harmonic_strength'] = float(np.max(np.abs(autocorr_range)))
-                        else:
-                            features['harmonic_strength'] = 0
-                    else:
-                        features['harmonic_strength'] = 0
-                else:
-                    features['harmonic_strength'] = 0
-            else:
-                features['harmonic_strength'] = 0
-        else:
-            features['harmonic_strength'] = 0
         
-        # Get filter thresholds from GUI if available
-        min_rms = getattr(self, 'filter_min_rms', 0.0005)
-        min_peak_ratio = getattr(self, 'filter_min_peak_ratio', 2.0)
-        min_harmonics = getattr(self, 'filter_min_harmonics', 0.1)
-        max_attack_ratio = getattr(self, 'filter_max_attack_ratio', 2.0)
+        # Decision
+        min_rms = self.filter_min_rms.get()
+        min_peak_ratio = self.filter_min_peak_ratio.get()
+        min_harmonics = self.filter_min_harmonics.get()
+        max_attack_ratio = 2.0
         
-        # MUCH MORE LENIENT decision logic
         is_picked = True
         rejection_reasons = []
         
-        # Only reject if REALLY silent
         if features['rms'] < min_rms:
             is_picked = False
             rejection_reasons.append(f"silence(rms={features['rms']:.5f})")
-        
-        # Only reject if NO attack at all
         elif features['peak_to_rms'] < min_peak_ratio:
             is_picked = False
             rejection_reasons.append(f"no_attack(p2r={features['peak_to_rms']:.1f})")
-        
-        # Only reject if attack is completely backwards (energy growing a lot)
         elif features['attack_ratio'] > max_attack_ratio:
             is_picked = False
             rejection_reasons.append(f"reverse_attack({features['attack_ratio']:.2f})")
-        
-        # Only reject if absolutely no harmonic content
         elif features['harmonic_strength'] < min_harmonics:
             is_picked = False
             rejection_reasons.append(f"no_harmonics({features['harmonic_strength']:.2f})")
-        
-        # Remove spectral centroid check - too unreliable
         
         features['is_picked'] = is_picked
         features['rejection_reasons'] = rejection_reasons
         
         return is_picked, features
-    
-    def on_filter_toggle(self):
-        """Show/hide advanced filter settings when filter is toggled"""
-        if self.filter_enabled_var.get():
-            self.filter_advanced_frame.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
-        else:
-            self.filter_advanced_frame.grid_remove()
-    
-    def process_captured_audio(self, captured, audio_state):
-        """Process captured audio and run inference"""
-        # Check if filtering is enabled
-        if hasattr(self, 'filter_enabled_var') and self.filter_enabled_var.get():
-            # Update filter thresholds from GUI
-            if hasattr(self, 'filter_min_rms'):
-                self.filter_min_rms = self.filter_min_rms.get()
-            if hasattr(self, 'filter_min_peak_ratio'):
-                self.filter_min_peak_ratio = self.filter_min_peak_ratio.get()
-            if hasattr(self, 'filter_min_harmonics'):
-                self.filter_min_harmonics = self.filter_min_harmonics.get()
-            self.filter_max_attack_ratio = 2.0  # Fixed for now
-            
-            # Analyze if this is a picked note
-            is_picked, audio_features = self.analyze_audio_features(
-                captured, audio_state['sr']
-            )
-            
-            # Log the analysis
-            feature_msg = f"Audio features: RMS={audio_features['rms']:.4f}, "
-            feature_msg += f"Peak/RMS={audio_features['peak_to_rms']:.1f}, "
-            feature_msg += f"Harmonics={audio_features['harmonic_strength']:.2f}, "
-            feature_msg += f"Attack ratio={audio_features['attack_ratio']:.2f}"
-            self.send_message('debug', feature_msg)
-            
-            if not is_picked:
-                rejection_msg = f"FILTERED: {', '.join(audio_features['rejection_reasons'])}"
-                self.send_message('debug', rejection_msg)
-                self.send_message('status', "Filtered: likely not a picked note")
-                return
-            else:
-                self.send_message('debug', "PASSED filter: detected as picked note")
-        
-        # Proceed with normal inference
-        # Sweep for best window
-        best_start, best_window, best_topk = self.sweep_best_window(
-            captured=captured,
-            state=self.state,
-            sweep_step_samples=audio_state['sweep_step_samples'],
-            topk=max(2, self.params['topk'])
-        )
-        
-        if not best_topk:
-            self.send_message('debug', "No candidates found")
-            return
-        
-        # Get top result with margin check
-        midi, name, prob, reason, was_ambiguous, f0_hz = self.decide_with_margin_and_pitch(
-            best_window=best_window,
-            best_topk=best_topk,
-            sr=audio_state['sr'],
-            margin=self.params['margin']
-        )
-        
-        # Update UI
-        self.send_message('note', {
-            'midi': midi,
-            'name': name,
-            'confidence': prob,
-            'ambiguous': was_ambiguous,
-            'reason': reason,
-            'f0': f0_hz,
-            'topk': best_topk[:self.params['topk']],
-            'best_offset': best_start / audio_state['sr']
-        })
-        
-        # Save WAV if enabled
-        if self.params['save_dir']:
-            self.save_captured_audio(captured, best_window, audio_state, name, prob)
-    
-    def save_captured_audio(self, captured, best_window, audio_state, name, prob):
-        """Save captured audio to WAV files"""
+
+    def _save_captured_audio(self, captured, best_window, name, prob):
+        """Save captured audio."""
         try:
             save_dir = Path(self.params['save_dir'])
             save_dir.mkdir(parents=True, exist_ok=True)
             
             ts = time.strftime("%Y%m%d_%H%M%S")
-            raw_path = save_dir / f"cap_{ts}_raw.wav"
-            best_path = save_dir / f"cap_{ts}_best_{name}_prob{prob:.2f}.wav"
+            sr = self.capture_state['sr']
+            attack = self.capture_state['attack']
             
             # Save raw capture
-            self.save_wav_int16(raw_path, audio_state['sr'], captured)
+            raw_path = save_dir / f"cap_{ts}_raw.wav"
+            self._save_wav_int16(raw_path, sr, captured)
             
             # Save best window
             win = best_window
-            attack = audio_state['attack']
             if win.shape[0] < attack:
                 win = np.pad(win, (0, attack - win.shape[0]), mode='constant')
             else:
                 win = win[:attack]
-            self.save_wav_int16(best_path, audio_state['sr'], win)
             
-            self.send_message('debug', f"Saved: {raw_path.name} and {best_path.name}")
+            best_path = save_dir / f"cap_{ts}_best_{name}_prob{prob:.2f}.wav"
+            self._save_wav_int16(best_path, sr, win)
+            
+            self._log(f"Saved: {raw_path.name}")
             
         except Exception as e:
-            self.send_message('debug', f"Failed to save WAV: {e}")
-    
-    def save_wav_int16(self, path, sr, audio_float32):
-        """Save audio as 16-bit WAV"""
+            self._log(f"Save failed: {e}")
+
+    def _save_wav_int16(self, path, sr, audio_float32):
+        """Save audio as 16-bit WAV."""
         x = np.clip(audio_float32.astype(np.float32), -1.0, 1.0)
         x_i16 = np.int16(x * 32767)
         wavfile.write(str(path), sr, x_i16)
-    
-    def send_message(self, msg_type, data):
-        """Send message to main thread"""
+
+    def stop_inference(self):
+        """Stop the inference system."""
+        if not self.is_running:
+            return
+        
+        self.is_running = False
+        self._stopping = True
+        self.status_var.set("Stopping...")
+        
+        # Stop streams
+        if self.output_stream is not None:
+            try:
+                self.output_stream.stop()
+                self.output_stream.close()
+            except:
+                pass
+            self.output_stream = None
+        
+        if self.stream is not None:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except:
+                pass
+            self.stream = None
+        
+        self.capture_state['mode'] = 'stopped'
+        
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.status_var.set("Ready")
+        self.status_light.set_state("stopped")
+        self.note_display_var.set("--")
+        self.confidence_var.set("Confidence: --")
+        self.midi_var.set("MIDI: --")
+        self.reason_var.set("")
+        self.fretboard.clear_notes()
+        
+        self._stopping = False
+
+    def _send_message(self, msg_type, data):
+        """Send message to main thread."""
         self.message_queue.put((msg_type, data))
-    
-    def update_message_display(self):
-        """Update UI from message queue (main thread)"""
+
+    def _update_message_display(self):
+        """Process messages from background thread."""
         try:
             while True:
                 msg_type, data = self.message_queue.get_nowait()
                 
                 if msg_type == 'status':
                     self.status_var.set(data)
-                    
-                elif msg_type == 'debug':
-                    self.debug_text.insert(tk.END, f"{data}\n")
-                    self.debug_text.see(tk.END)
-                    
+                elif msg_type == 'state':
+                    self.status_light.set_state(data)
+                elif msg_type == 'log':
+                    self._log(data)
                 elif msg_type == 'error':
                     messagebox.showerror("Error", data)
                     self.stop_inference()
                     
-                elif msg_type == 'note':
-                    # Update note display
-                    self.note_label.config(text=data['name'])
-                    self.confidence_label.config(text=f"Confidence: {data['confidence']:.3f}")
-                    self.midi_label.config(text=f"MIDI: {data['midi']}")
-                    
-                    # Update fretboard
-                    self.fretboard.show_note(data['midi'])
-                    
-                    # Add debug info
-                    debug_msg = f"\nDetected: {data['name']} (MIDI {data['midi']})"
-                    debug_msg += f"\nConfidence: {data['confidence']:.3f}"
-                    debug_msg += f"\nReason: {data['reason']}"
-                    
-                    if data['ambiguous']:
-                        debug_msg += f"\nAMBIGUOUS (margin < {self.params['margin']:.3f})"
-                        if data['f0']:
-                            debug_msg += f"\nF0 estimate: {data['f0']:.1f} Hz"
-                    
-                    debug_msg += f"\nBest offset: {data['best_offset']:.3f}s"
-                    debug_msg += f"\nTop-{len(data['topk'])} candidates:"
-                    for i, (m, n, p) in enumerate(data['topk'], 1):
-                        debug_msg += f"\n  {i}) {n:<4s} MIDI {m:<3d} prob={p:.3f}"
-                    
-                    debug_msg += "\n" + "-"*50
-                    
-                    self.debug_text.insert(tk.END, debug_msg + "\n")
-                    self.debug_text.see(tk.END)
-                    
         except queue.Empty:
             pass
-        finally:
-            self.root.after(50, self.update_message_display)
-    
+        
+        # Schedule next update
+        self.root.after(50, self._update_message_display)
+
     def on_closing(self):
-        """Handle window closing"""
+        """Handle window close."""
         if self.is_running:
             self.stop_inference()
-            time.sleep(0.5)
         self.root.destroy()
-    
-    # --- Model and inference methods (adapted from original script) ---
-    
-    def get_model_device(self):
-        """Get compute device for model"""
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
+
+    # ============================
+    # MODEL & INFERENCE METHODS
+    # ============================
+
+    def _get_model_device(self):
+        """Get the best available compute device."""
         if torch.cuda.is_available():
-            return torch.device("cuda")
-        return torch.device("cpu")
-    
-    def load_checkpoint(self, checkpoint_path, model_device):
-        """Load model checkpoint"""
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+            return "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    def _load_checkpoint(self, path: Path, model_device: str):
+        """Load model checkpoint."""
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         
-        num_classes = int(ckpt["num_classes"])
         mel_params = ckpt["mel_params"]
+        num_classes = int(ckpt["num_classes"])
         n_mels = int(mel_params["n_mels"])
         
         model = NoteCNN(num_classes=num_classes, n_mels=n_mels, dropout_p=0.0)
-        model.load_state_dict(ckpt["model_state"])
+        
+        # Try both possible state dict keys
+        if "model_state" in ckpt:
+            model.load_state_dict(ckpt["model_state"])
+        else:
+            model.load_state_dict(ckpt["model_state_dict"])
+        
         model.to(model_device)
         model.eval()
         
-        # Mel+DB transforms on CPU
         mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=int(ckpt["sample_rate"]),
             n_fft=int(mel_params["n_fft"]),
@@ -1165,65 +1278,60 @@ class NoteInferenceGUI:
         
         idx_to_midi = ckpt["idx_to_midi"]
         if isinstance(idx_to_midi, dict):
-            idx_to_midi_norm = {int(k): int(v) for k, v in idx_to_midi.items()}
-        else:
-            idx_to_midi_norm = idx_to_midi
+            idx_to_midi = {int(k): int(v) for k, v in idx_to_midi.items()}
         
         return {
             "model": model,
             "model_device": model_device,
             "mel": mel,
             "db": db,
-            "idx_to_midi": idx_to_midi_norm,
+            "idx_to_midi": idx_to_midi,
             "sample_rate": int(ckpt["sample_rate"]),
             "attack_samples": int(ckpt["attack_samples"]),
             "num_frames": int(mel_params["num_frames"]),
         }
-    
-    def waveform_to_logmel_cpu(self, wav_1d, mel, db, num_frames):
-        """Convert waveform to log-mel spectrogram on CPU"""
+
+    def _waveform_to_logmel(self, wav_1d):
+        """Convert waveform to log-mel spectrogram."""
+        state = self.state
         wav = wav_1d.astype(np.float32)
-        wav = wav - float(np.mean(wav))  # DC removal
+        wav = wav - float(np.mean(wav))
         
-        wav_t = torch.from_numpy(wav).unsqueeze(0)  # [1, T]
+        wav_t = torch.from_numpy(wav).unsqueeze(0)
         
-        spec = mel(wav_t)         # [1, n_mels, T]
-        spec_db = db(spec)        # [1, n_mels, T]
+        spec = state["mel"](wav_t)
+        spec_db = state["db"](spec)
         
         mean = spec_db.mean(dim=2, keepdim=True)
         std = spec_db.std(dim=2, keepdim=True) + 1e-6
         spec_db = (spec_db - mean) / std
         
+        num_frames = state["num_frames"]
         _, _, t = spec_db.shape
         if t < num_frames:
             spec_db = torch.nn.functional.pad(spec_db, (0, num_frames - t))
         elif t > num_frames:
             spec_db = spec_db[:, :, :num_frames]
         
-        return spec_db.unsqueeze(0)  # [1, 1, n_mels, num_frames]
-    
-    def peak_normalize(self, window):
-        """Peak normalize audio"""
+        return spec_db.unsqueeze(0)
+
+    def _peak_normalize(self, window):
+        """Peak normalize audio."""
         w = window.astype(np.float32)
         peak = float(np.max(np.abs(w))) if w.size else 0.0
         if peak > 0:
             w = (w / peak) * 0.95
         return w
-    
-    def predict_topk_window(self, state, window_1d, topk, peak_normalize=True):
-        """Run inference on a window"""
-        w = self.peak_normalize(window_1d) if peak_normalize else window_1d.astype(np.float32)
+
+    def _predict_topk_window(self, window_1d, topk, peak_normalize=True):
+        """Run inference on a window."""
+        w = self._peak_normalize(window_1d) if peak_normalize else window_1d.astype(np.float32)
         
-        spec = self.waveform_to_logmel_cpu(
-            wav_1d=w,
-            mel=state["mel"],
-            db=state["db"],
-            num_frames=state["num_frames"],
-        )
+        spec = self._waveform_to_logmel(w)
+        spec = spec.to(self.state["model_device"], dtype=torch.float32)
         
-        spec = spec.to(state["model_device"], dtype=torch.float32)
         with torch.no_grad():
-            logits = state["model"](spec)
+            logits = self.state["model"](spec)
             probs = torch.softmax(logits, dim=1)
         
         probs_cpu = probs.detach().to("cpu")
@@ -1232,14 +1340,14 @@ class NoteInferenceGUI:
         
         out = []
         for p, idx in zip(vals[0].tolist(), idxs[0].tolist()):
-            midi = int(state["idx_to_midi"][int(idx)])
-            out.append((midi, self.midi_to_name(midi), float(p)))
+            midi = int(self.state["idx_to_midi"][int(idx)])
+            out.append((midi, self._midi_to_name(midi), float(p)))
         
         return out, probs_cpu
-    
-    def sweep_best_window(self, captured, state, sweep_step_samples, topk):
-        """Sweep to find best inference window"""
-        attack = state["attack_samples"]
+
+    def _sweep_best_window(self, captured, sweep_step_samples, topk):
+        """Sweep to find best inference window."""
+        attack = self.state["attack_samples"]
         
         if captured.shape[0] < attack:
             padded = np.zeros(attack, dtype=np.float32)
@@ -1257,12 +1365,7 @@ class NoteInferenceGUI:
         for start in range(0, last_start + 1, step):
             window = captured[start:start + attack]
             
-            topk_list, _ = self.predict_topk_window(
-                state=state,
-                window_1d=window,
-                topk=topk,
-                peak_normalize=True,
-            )
+            topk_list, _ = self._predict_topk_window(window, topk, peak_normalize=True)
             if not topk_list:
                 continue
             
@@ -1274,9 +1377,9 @@ class NoteInferenceGUI:
                 best_topk = topk_list
         
         return best_start, best_window, best_topk
-    
-    def decide_with_margin_and_pitch(self, best_window, best_topk, sr, margin):
-        """Apply margin check and pitch tie-break"""
+
+    def _decide_with_margin_and_pitch(self, best_window, best_topk, sr, margin):
+        """Apply margin check and pitch tie-break."""
         if not best_topk:
             return -1, "UNKNOWN", 0.0, "no_candidates", True, None
         
@@ -1288,28 +1391,41 @@ class NoteInferenceGUI:
         gap = p1 - p2
         
         if gap >= margin:
-            return m1, n1, p1, f"margin_ok(gap={gap:.3f}>=margin={margin:.3f})", False, None
+            return m1, n1, p1, f"margin_ok(gap={gap:.3f})", False, None
         
-        # Ambiguous under margin
+        # Ambiguous
         if abs(m1 - m2) == 1:
-            chosen, f0 = self.pitch_tiebreak_adjacent(best_window, sr, m1, m2)
+            chosen, f0 = self._pitch_tiebreak(best_window, sr, m1, m2)
             if chosen is not None:
                 if chosen == m1:
-                    return m1, n1, p1, f"ambiguous_adjacent_pitch->top1", True, f0
-                return m2, n2, p2, f"ambiguous_adjacent_pitch->top2", True, f0
-            
-            return m1, n1, p1, f"ambiguous_adjacent_no_pitch", True, None
+                    return m1, n1, p1, f"pitch->top1", True, f0
+                return m2, n2, p2, f"pitch->top2", True, f0
+            return m1, n1, p1, f"ambiguous_adjacent", True, None
         
         return m1, n1, p1, f"ambiguous_non_adjacent", True, None
-    
-    def estimate_f0_autocorr_hz(self, x, sr, fmin=70.0, fmax=1200.0):
-        """Estimate fundamental frequency using autocorrelation"""
-        if x.size < int(sr * 0.02):  # require ~20ms
+
+    def _pitch_tiebreak(self, window, sr, midi_a, midi_b):
+        """Tie-break between adjacent semitones using pitch detection."""
+        f0 = self._estimate_f0(window, sr)
+        if f0 is None:
+            return None, None
+        
+        fa = self._midi_to_freq(midi_a)
+        fb = self._midi_to_freq(midi_b)
+        
+        da = abs(f0 - fa)
+        db = abs(f0 - fb)
+        
+        return (midi_a if da <= db else midi_b), float(f0)
+
+    def _estimate_f0(self, x, sr, fmin=70.0, fmax=1200.0):
+        """Estimate fundamental frequency using autocorrelation."""
+        if x.size < int(sr * 0.02):
             return None
         
         y = x.astype(np.float32)
         y = y - float(np.mean(y))
-        y = self.peak_normalize(y)
+        y = self._peak_normalize(y)
         
         win = np.hanning(y.size).astype(np.float32)
         y = y * win
@@ -1335,35 +1451,26 @@ class NoteInferenceGUI:
             return None
         
         return float(sr / best_lag)
-    
-    def midi_to_freq_hz(self, midi):
-        """Convert MIDI note to frequency"""
+
+    def _midi_to_freq(self, midi):
+        """Convert MIDI note to frequency."""
         return 440.0 * (2.0 ** ((midi - 69) / 12.0))
-    
-    def pitch_tiebreak_adjacent(self, window, sr, midi_a, midi_b):
-        """Tie-break between adjacent semitones using pitch detection"""
-        f0 = self.estimate_f0_autocorr_hz(window, sr=sr)
-        if f0 is None:
-            return None, None
-        
-        fa = self.midi_to_freq_hz(midi_a)
-        fb = self.midi_to_freq_hz(midi_b)
-        
-        da = abs(f0 - fa)
-        db = abs(f0 - fb)
-        
-        return (midi_a if da <= db else midi_b), float(f0)
-    
-    def midi_to_name(self, midi):
-        """Convert MIDI note number to note name"""
+
+    def _midi_to_name(self, midi):
+        """Convert MIDI note number to note name."""
         names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         note = names[midi % 12]
         octave = (midi // 12) - 1
         return f"{note}{octave}"
 
 
+# ============================
+# MAIN
+# ============================
+
 def main():
     root = tk.Tk()
+    root.minsize(1000, 700)
     app = NoteInferenceGUI(root)
     root.mainloop()
 

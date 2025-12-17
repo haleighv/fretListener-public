@@ -104,7 +104,8 @@ def build_training_mix(
 
     random.seed(seed)
 
-    combined: list[dict] = []
+    # Load all samples, grouped by dataset
+    datasets: dict[str, list[dict]] = {}  # dataset_root -> list of rows
 
     for root in dataset_roots:
         root = root.resolve()
@@ -119,6 +120,7 @@ def build_training_mix(
             print(f"Warning: no rows in {meta_csv}; skipping.")
             continue
 
+        dataset_rows: list[dict] = []
         for row in rows:
             row_copy = dict(row)
 
@@ -156,12 +158,81 @@ def build_training_mix(
             abs_path = (root / relpath).resolve()
             row_copy["abs_path"] = str(abs_path)
 
-            combined.append(row_copy)
+            dataset_rows.append(row_copy)
 
-    if not combined:
+        if dataset_rows:
+            datasets[str(root)] = dataset_rows
+
+    if not datasets:
         raise SystemExit("No samples loaded from any dataset; nothing to do.")
 
-    print(f"Total samples loaded from all datasets: {len(combined)}")
+    total_samples = sum(len(rows) for rows in datasets.values())
+    print(f"Total samples loaded from all datasets: {total_samples}")
+
+    # === LEAKAGE PREVENTION ===
+    # Split at the DATASET level, not the sample level.
+    # This ensures all samples from a recording session stay together,
+    # preventing the model from learning session-specific characteristics.
+    #
+    # Strategy: Assign entire datasets to train or val, trying to approximate
+    # the target train_ratio while ensuring val has at least one dataset.
+
+    dataset_names = list(datasets.keys())
+    random.shuffle(dataset_names)
+
+    # Calculate cumulative sample counts to find best split point
+    if len(dataset_names) == 1:
+        # Only one dataset: fall back to within-dataset splitting by take/group
+        # but warn the user about potential leakage
+        print(
+            "Warning: Only one dataset provided. Splitting within dataset by sample, "
+            "which may cause leakage if samples share recording conditions."
+        )
+        train_datasets = dataset_names
+        val_datasets = []
+        single_dataset_mode = True
+    else:
+        single_dataset_mode = False
+        # Find split point that best approximates train_ratio
+        dataset_sizes = [len(datasets[name]) for name in dataset_names]
+        cumsum = []
+        running = 0
+        for size in dataset_sizes:
+            running += size
+            cumsum.append(running)
+
+        target_train_samples = int(total_samples * train_ratio)
+
+        # Find best split: at least 1 dataset for val
+        best_split_idx = 0
+        best_diff = float("inf")
+        for i in range(len(dataset_names) - 1):  # Leave at least 1 for val
+            diff = abs(cumsum[i] - target_train_samples)
+            if diff < best_diff:
+                best_diff = diff
+                best_split_idx = i
+
+        train_datasets = dataset_names[: best_split_idx + 1]
+        val_datasets = dataset_names[best_split_idx + 1 :]
+
+        train_count = sum(len(datasets[d]) for d in train_datasets)
+        val_count = sum(len(datasets[d]) for d in val_datasets)
+        actual_ratio = train_count / total_samples if total_samples > 0 else 0
+
+        print(f"\nDataset-level split to prevent leakage:")
+        print(f"  Train datasets ({len(train_datasets)}):")
+        for d in train_datasets:
+            print(f"    - {Path(d).name}: {len(datasets[d])} samples")
+        print(f"  Val datasets ({len(val_datasets)}):")
+        for d in val_datasets:
+            print(f"    - {Path(d).name}: {len(datasets[d])} samples")
+        print(f"  Actual train ratio: {actual_ratio:.2%} (target: {train_ratio:.0%})")
+
+    # Combine all samples with dataset info
+    combined: list[dict] = []
+    for dataset_root, rows in datasets.items():
+        for row in rows:
+            combined.append(row)
 
     # Group by position class (pos)
     by_pos: dict[int, list[dict]] = {}
@@ -170,43 +241,113 @@ def build_training_mix(
         by_pos.setdefault(pos, []).append(row)
 
     # Build balanced subset with optional per-class cap
+    # When capping, try to maintain dataset diversity within each class
     selected: list[dict] = []
     for pos, rows in sorted(by_pos.items(), key=lambda kv: kv[0]):
-        rows_copy = rows[:]
-        random.shuffle(rows_copy)
-        if max_per_class is not None:
-            rows_copy = rows_copy[:max_per_class]
+        if max_per_class is not None and len(rows) > max_per_class:
+            # Group by dataset first, then sample proportionally from each
+            by_dataset: dict[str, list[dict]] = {}
+            for r in rows:
+                by_dataset.setdefault(r["dataset_root"], []).append(r)
+
+            # Shuffle within each dataset
+            for ds_rows in by_dataset.values():
+                random.shuffle(ds_rows)
+
+            # Proportionally sample from each dataset
+            rows_copy: list[dict] = []
+            dataset_keys = list(by_dataset.keys())
+            random.shuffle(dataset_keys)
+
+            # Round-robin selection to maintain diversity
+            indices = {k: 0 for k in dataset_keys}
+            while len(rows_copy) < max_per_class:
+                added_any = False
+                for k in dataset_keys:
+                    if indices[k] < len(by_dataset[k]) and len(rows_copy) < max_per_class:
+                        rows_copy.append(by_dataset[k][indices[k]])
+                        indices[k] += 1
+                        added_any = True
+                if not added_any:
+                    break
+        else:
+            rows_copy = rows[:]
+            random.shuffle(rows_copy)
+
         selected.extend(rows_copy)
+        datasets_in_class = len({r["dataset_root"] for r in rows_copy})
         print(
             f"Class pos={pos}: using {len(rows_copy)} / {len(rows)} samples "
-            f"from {len({r.get('dataset_name', '') for r in rows})} dataset(s)"
+            f"from {datasets_in_class} dataset(s)"
         )
 
     if not selected:
         raise SystemExit("No samples selected for training mix; nothing to write.")
 
-    # Train/val split per class to keep class balance in both
+    # Assign splits based on dataset membership
     final_rows: list[dict] = []
-    by_pos_selected: dict[int, list[dict]] = {}
-    for row in selected:
-        by_pos_selected.setdefault(row["pos"], []).append(row)
 
-    for pos, rows in sorted(by_pos_selected.items(), key=lambda kv: kv[0]):
-        random.shuffle(rows)
-        n = len(rows)
-        if n == 1:
-            n_train = 1
-        else:
-            n_train = int(round(n * train_ratio))
-            n_train = max(1, min(n_train, n - 1))
+    if single_dataset_mode:
+        # Fallback: split within the single dataset, but group by take if available
+        by_pos_selected: dict[int, list[dict]] = {}
+        for row in selected:
+            by_pos_selected.setdefault(row["pos"], []).append(row)
 
-        for i, row in enumerate(rows):
-            split = "train" if i < n_train else "val"
+        for pos, rows in sorted(by_pos_selected.items(), key=lambda kv: kv[0]):
+            # Try to group by take to reduce leakage
+            by_take: dict[int, list[dict]] = {}
+            for r in rows:
+                take = r.get("take", -1)
+                by_take.setdefault(take, []).append(r)
+
+            take_keys = list(by_take.keys())
+            random.shuffle(take_keys)
+
+            if len(take_keys) > 1:
+                # Split by take groups
+                n_takes = len(take_keys)
+                n_train_takes = max(1, int(round(n_takes * train_ratio)))
+                n_train_takes = min(n_train_takes, n_takes - 1)  # Keep at least 1 for val
+
+                train_takes = set(take_keys[:n_train_takes])
+                for r in rows:
+                    r_copy = dict(r)
+                    r_copy["split"] = "train" if r["take"] in train_takes else "val"
+                    final_rows.append(r_copy)
+            else:
+                # No take info or single take: random split (with leakage warning already shown)
+                random.shuffle(rows)
+                n = len(rows)
+                n_train = max(1, min(int(round(n * train_ratio)), n - 1)) if n > 1 else 1
+                for i, r in enumerate(rows):
+                    r_copy = dict(r)
+                    r_copy["split"] = "train" if i < n_train else "val"
+                    final_rows.append(r_copy)
+    else:
+        # Multi-dataset mode: assign based on dataset membership
+        train_set = set(train_datasets)
+        for row in selected:
             row_copy = dict(row)
-            row_copy["split"] = split
+            row_copy["split"] = "train" if row["dataset_root"] in train_set else "val"
             final_rows.append(row_copy)
 
-    print(f"Final training mix size: {len(final_rows)} (train+val)")
+    # Report final split statistics
+    train_final = [r for r in final_rows if r["split"] == "train"]
+    val_final = [r for r in final_rows if r["split"] == "val"]
+    print(f"\nFinal training mix: {len(train_final)} train, {len(val_final)} val")
+
+    # Check class coverage in both splits
+    train_classes = set(r["pos"] for r in train_final)
+    val_classes = set(r["pos"] for r in val_final)
+    all_classes = train_classes | val_classes
+
+    missing_in_train = all_classes - train_classes
+    missing_in_val = all_classes - val_classes
+
+    if missing_in_train:
+        print(f"Warning: {len(missing_in_train)} classes missing from train split: {sorted(missing_in_train)}")
+    if missing_in_val:
+        print(f"Warning: {len(missing_in_val)} classes missing from val split: {sorted(missing_in_val)}")
 
     output_csv = output_csv.resolve()
     output_csv.parent.mkdir(parents=True, exist_ok=True)

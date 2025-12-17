@@ -279,9 +279,9 @@ class TrainGUI(tk.Tk):
         self.ckpt_name_var = tk.StringVar(value="note_cnn_best.pt")
         self.train_script_var = tk.StringVar(value=str((_project_root() / "src" / "train_note_model.py")))
 
-        self.n_mels_var = tk.StringVar(value="48")
-        self.hop_length_var = tk.StringVar(value="256")
-        self.num_frames_var = tk.StringVar(value="32")
+        self.n_mels_var = tk.StringVar(value="64")
+        self.hop_length_var = tk.StringVar(value="128")
+        self.num_frames_var = tk.StringVar(value="96")
 
         grid = ttk.Frame(train_frame)
         grid.pack(fill="x")
@@ -679,9 +679,9 @@ class TrainGUI(tk.Tk):
                     "--num-workers", (self.num_workers_var.get() or "0").strip(),
                     "--seed", (self.train_seed_var.get() or "42").strip(),
                     "--checkpoint-name", (self.ckpt_name_var.get() or "note_cnn_best.pt").strip(),
-                    "--n-mels", (self.n_mels_var.get() or "48").strip(),
-                    "--hop-length", (self.hop_length_var.get() or "256").strip(),
-                    "--num-frames", (self.num_frames_var.get() or "32").strip(),
+                    "--n-mels", (self.n_mels_var.get() or "64").strip(),
+                    "--hop-length", (self.hop_length_var.get() or "128").strip(),
+                    "--num-frames", (self.num_frames_var.get() or "96").strip(),
                 ]
 
                 self._log("Starting training...")

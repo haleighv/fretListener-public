@@ -673,9 +673,9 @@ def main():
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--n-mels", type=int, default=48)
-    parser.add_argument("--hop-length", type=int, default=256)
-    parser.add_argument("--num-frames", type=int, default=32)
+    parser.add_argument("--n-mels", type=int, default=64)
+    parser.add_argument("--hop-length", type=int, default=128)
+    parser.add_argument("--num-frames", type=int, default=96)
 
     args = parser.parse_args()
 

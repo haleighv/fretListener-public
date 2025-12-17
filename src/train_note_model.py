@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 import shutil
+import sys
+import platform
 
 import numpy as np
 import torch
@@ -80,18 +82,24 @@ class NoteDatasetFromMix(Dataset):
         self.rows = rows
         self.midi_to_idx = midi_to_idx
         self.sample_rate = sample_rate
+        self.attack_duration = attack_duration
         self.attack_samples = int(round(sample_rate * attack_duration))
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.n_mels = n_mels
+        self.f_min = f_min
+        self.f_max = f_max
         self.num_frames = num_frames
         self.augment = augment  # currently unused (augmentation disabled)
 
         # Audio transforms
         self.mel_spec = torchaudio.transforms.MelSpectrogram(
             sample_rate=self.sample_rate,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            n_mels=n_mels,
-            f_min=f_min,
-            f_max=f_max,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            n_mels=self.n_mels,
+            f_min=self.f_min,
+            f_max=self.f_max,
         )
         self.db_transform = torchaudio.transforms.AmplitudeToDB()
 
@@ -438,6 +446,68 @@ def plot_training_curves(
     plt.close()
 
 
+def plot_lr_curve(
+    history: Dict[str, List[float]],
+    run_dir: Path,
+) -> None:
+    if "lr" not in history or not history["lr"]:
+        return
+    epochs = range(1, len(history["lr"]) + 1)
+    plt.figure()
+    plt.plot(epochs, history["lr"], label="lr")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning rate")
+    plt.title("Learning Rate Schedule")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(run_dir / "lr_curve.png")
+    plt.close()
+
+
+def plot_confusion_matrix(
+    confusion: np.ndarray,
+    run_dir: Path,
+    title: str = "Confusion Matrix (Validation)",
+) -> None:
+    plt.figure(figsize=(10, 8))
+    plt.imshow(confusion, interpolation="nearest")
+    plt.title(title)
+    plt.xlabel("Predicted class index")
+    plt.ylabel("True class index")
+    plt.colorbar()
+    plt.tight_layout()
+    plt.savefig(run_dir / "confusion_matrix.png")
+    plt.close()
+
+
+def plot_per_class_accuracy(
+    confusion: np.ndarray,
+    idx_to_midi: Dict[int, int],
+    run_dir: Path,
+) -> None:
+    true_counts = confusion.sum(axis=1)
+    correct = np.diag(confusion)
+    acc = np.zeros_like(correct, dtype=np.float32)
+    nonzero = true_counts > 0
+    acc[nonzero] = correct[nonzero] / true_counts[nonzero]
+
+    # Label with MIDI (stable across runs)
+    labels = [str(idx_to_midi[i]) for i in range(len(acc))]
+
+    plt.figure(figsize=(12, 4))
+    plt.plot(range(len(acc)), acc, marker="o", linestyle="-", label="per-class acc")
+    plt.xticks(ticks=range(len(acc)), labels=labels, rotation=90)
+    plt.ylim(0.0, 1.0)
+    plt.xlabel("MIDI")
+    plt.ylabel("Accuracy")
+    plt.title("Per-class Accuracy (Validation)")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(run_dir / "per_class_accuracy.png")
+    plt.close()
+
+
 def export_onnx_model(
     model: nn.Module,
     run_dir: Path,
@@ -480,6 +550,10 @@ def write_summary(
     best_val_acc: float,
     best_val_loss: float,
     confusion: np.ndarray,
+    dataset_params: Dict[str, float],
+    model_params: Dict[str, float],
+    optimizer_params: Dict[str, float],
+    scheduler_params: Dict[str, float],
 ) -> None:
     summary_path = run_dir / "summary.txt"
     with summary_path.open("w") as f:
@@ -488,13 +562,46 @@ def write_summary(
         f.write(f"Run directory: {run_dir}\n")
         f.write(f"Mix CSV:       {Path(args.mix_csv).resolve()}\n")
         f.write(f"Device:        {device.type}\n")
-        f.write(f"Seed:          {args.seed}\n\n")
+        f.write(f"Seed:          {args.seed}\n")
+        f.write(f"Timestamp:     {datetime.now().isoformat(timespec='seconds')}\n\n")
 
-        f.write("Hyperparameters:\n")
+        f.write("Repro / Environment:\n")
+        f.write(f"  Python:      {sys.version.split()[0]}\n")
+        f.write(f"  Platform:    {platform.platform()}\n")
+        f.write(f"  Torch:       {torch.__version__}\n")
+        f.write(f"  Torchaudio:  {torchaudio.__version__}\n\n")
+
+        f.write("Command:\n")
+        f.write("  " + " ".join(sys.argv) + "\n\n")
+
+        f.write("Hyperparameters (CLI):\n")
         f.write(f"  Batch size:  {args.batch_size}\n")
         f.write(f"  Epochs:      {args.epochs}\n")
-        f.write(f"  Learning rate: {args.lr}\n")
-        f.write(f"  Num workers: {args.num_workers}\n\n")
+        f.write(f"  Learning rate (initial): {args.lr}\n")
+        f.write(f"  Num workers: {args.num_workers}\n")
+        f.write(f"  n_mels:      {args.n_mels}\n")
+        f.write(f"  hop_length:  {args.hop_length}\n")
+        f.write(f"  num_frames:  {args.num_frames}\n\n")
+
+        f.write("Dataset params (fixed/defaults):\n")
+        for k in sorted(dataset_params.keys()):
+            f.write(f"  {k}: {dataset_params[k]}\n")
+        f.write("\n")
+
+        f.write("Model params:\n")
+        for k in sorted(model_params.keys()):
+            f.write(f"  {k}: {model_params[k]}\n")
+        f.write("\n")
+
+        f.write("Optimizer:\n")
+        for k in sorted(optimizer_params.keys()):
+            f.write(f"  {k}: {optimizer_params[k]}\n")
+        f.write("\n")
+
+        f.write("LR Scheduler:\n")
+        for k in sorted(scheduler_params.keys()):
+            f.write(f"  {k}: {scheduler_params[k]}\n")
+        f.write("\n")
 
         f.write("Data:\n")
         f.write(f"  Train samples: {train_len}\n")
@@ -512,10 +619,13 @@ def write_summary(
             ta = history["train_acc"][epoch]
             vl = history["val_loss"][epoch]
             va = history["val_acc"][epoch]
+            lr_str = ""
+            if "lr" in history and len(history["lr"]) == len(history["train_loss"]):
+                lr_str = f", lr={history['lr'][epoch]:.6g}"
             f.write(
                 f"  Epoch {epoch+1:02d}: "
                 f"train_loss={tl:.4f}, train_acc={ta:.4f}, "
-                f"val_loss={vl:.4f}, val_acc={va:.4f}\n"
+                f"val_loss={vl:.4f}, val_acc={va:.4f}{lr_str}\n"
             )
         f.write("\n")
 
@@ -526,7 +636,15 @@ def write_summary(
 
         f.write("Confusion matrix (rows=true, cols=pred):\n")
         f.write(str(confusion))
-        f.write("\n")
+        f.write("\n\n")
+
+        f.write("Figures written:\n")
+        f.write("  - loss_curves.png\n")
+        f.write("  - accuracy_curves.png\n")
+        if "lr" in history and history["lr"]:
+            f.write("  - lr_curve.png\n")
+        f.write("  - confusion_matrix.png\n")
+        f.write("  - per_class_accuracy.png\n")
 
 
 # -----------------------------
@@ -554,6 +672,11 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+
+    parser.add_argument("--n-mels", type=int, default=48)
+    parser.add_argument("--hop-length", type=int, default=256)
+    parser.add_argument("--num-frames", type=int, default=32)
+
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -580,15 +703,38 @@ def main():
     print(f"Unique MIDI notes: {num_classes}")
     print("MIDI classes:", sorted(midi_to_idx.keys()))
 
+    # Fixed dataset params (defaults) written into summary/checkpoint for reproducibility
+    sample_rate = 48000
+    attack_duration = 0.25
+    n_fft = 1024
+    f_min = 55.0
+    f_max = 3000.0
+
     # Datasets (augmentation currently disabled even for train)
     train_ds = NoteDatasetFromMix(
         train_rows,
         midi_to_idx,
+        sample_rate=sample_rate,
+        attack_duration=attack_duration,
+        n_fft=n_fft,
+        hop_length=args.hop_length,
+        n_mels=args.n_mels,
+        f_min=f_min,
+        f_max=f_max,
+        num_frames=args.num_frames,
         augment=False,
     )
     val_ds = NoteDatasetFromMix(
         val_rows,
         midi_to_idx,
+        sample_rate=sample_rate,
+        attack_duration=attack_duration,
+        n_fft=n_fft,
+        hop_length=args.hop_length,
+        n_mels=args.n_mels,
+        f_min=f_min,
+        f_max=f_max,
+        num_frames=args.num_frames,
         augment=False,
     )
 
@@ -608,16 +754,23 @@ def main():
     )
 
     # Model and training setup
-    model = NoteCNN(num_classes=num_classes, n_mels=48, dropout_p=0.3).to(device)
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+    dropout_p = 0.3
+    label_smoothing = 0.05
+
+    model = NoteCNN(num_classes=num_classes, n_mels=args.n_mels, dropout_p=dropout_p).to(device)
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # LR scheduler on validation accuracy
+    scheduler_mode = "max"
+    scheduler_factor = 0.1
+    scheduler_patience = 5
+
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        mode="max",
-        factor=0.1,
-        patience=5,
+        mode=scheduler_mode,
+        factor=scheduler_factor,
+        patience=scheduler_patience,
         verbose=True,
     )
 
@@ -626,6 +779,7 @@ def main():
         "train_acc": [],
         "val_loss": [],
         "val_acc": [],
+        "lr": [],
     }
 
     best_val_acc = 0.0
@@ -654,6 +808,12 @@ def main():
         # Step LR scheduler on validation accuracy
         scheduler.step(val_acc)
 
+        # Record LR (after scheduler step)
+        try:
+            history["lr"].append(float(optimizer.param_groups[0]["lr"]))
+        except Exception:
+            history["lr"].append(float("nan"))
+
         # Track best by validation accuracy (tie-breaker: lower loss)
         is_better = (val_acc > best_val_acc) or (
             val_acc == best_val_acc and val_loss < best_val_loss
@@ -668,14 +828,29 @@ def main():
                 "midi_to_idx": midi_to_idx,
                 "idx_to_midi": idx_to_midi,
                 "sample_rate": train_ds.sample_rate,
+                "attack_duration": train_ds.attack_duration,
                 "attack_samples": train_ds.attack_samples,
                 "mel_params": {
-                    "n_fft": 1024,
-                    "hop_length": 256,
-                    "n_mels": 48,
-                    "f_min": 55.0,
-                    "f_max": 3000.0,
+                    "n_fft": train_ds.n_fft,
+                    "hop_length": train_ds.hop_length,
+                    "n_mels": train_ds.n_mels,
+                    "f_min": train_ds.f_min,
+                    "f_max": train_ds.f_max,
                     "num_frames": train_ds.num_frames,
+                },
+                "model_params": {
+                    "model_class": "NoteCNN",
+                    "dropout_p": dropout_p,
+                },
+                "training_params": {
+                    "criterion": "CrossEntropyLoss",
+                    "label_smoothing": label_smoothing,
+                    "optimizer": "Adam",
+                    "lr_initial": args.lr,
+                    "scheduler": "ReduceLROnPlateau",
+                    "scheduler_mode": scheduler_mode,
+                    "scheduler_factor": scheduler_factor,
+                    "scheduler_patience": scheduler_patience,
                 },
             }
             torch.save(checkpoint, checkpoint_path)
@@ -694,16 +869,48 @@ def main():
         model, val_loader, device, num_classes=num_classes
     )
 
-    # Generate plots
+    # Generate plots (paper-relevant, low overhead)
     plot_training_curves(history, run_dir)
+    plot_lr_curve(history, run_dir)
+    plot_confusion_matrix(confusion, run_dir)
+    plot_per_class_accuracy(confusion, idx_to_midi, run_dir)
 
     # Export ONNX for Netron
     export_onnx_model(
         model,
         run_dir,
-        num_mels=48,
+        num_mels=args.n_mels,
         num_frames=train_ds.num_frames,
     )
+
+    dataset_params = {
+        "sample_rate": float(train_ds.sample_rate),
+        "attack_duration_sec": float(train_ds.attack_duration),
+        "attack_samples": float(train_ds.attack_samples),
+        "n_fft": float(train_ds.n_fft),
+        "hop_length": float(train_ds.hop_length),
+        "n_mels": float(train_ds.n_mels),
+        "f_min": float(train_ds.f_min),
+        "f_max": float(train_ds.f_max),
+        "num_frames": float(train_ds.num_frames),
+        "augment": float(0.0),
+    }
+    model_params = {
+        "model_class": "NoteCNN",
+        "dropout_p": float(dropout_p),
+        "num_classes": float(num_classes),
+    }
+    optimizer_params = {
+        "optimizer": "Adam",
+        "lr_initial": float(args.lr),
+    }
+    scheduler_params = {
+        "scheduler": "ReduceLROnPlateau",
+        "mode": scheduler_mode,
+        "factor": float(scheduler_factor),
+        "patience": float(scheduler_patience),
+        "step_metric": "val_acc",
+    }
 
     # Write summary
     write_summary(
@@ -720,6 +927,10 @@ def main():
         best_val_acc=best_val_acc,
         best_val_loss=best_val_loss,
         confusion=confusion,
+        dataset_params=dataset_params,
+        model_params=model_params,
+        optimizer_params=optimizer_params,
+        scheduler_params=scheduler_params,
     )
 
     print("Artifacts written to:", run_dir)

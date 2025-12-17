@@ -1,0 +1,101 @@
+Note CNN Training Summary
+=========================
+
+Run directory: artifacts/models/note_20251216_155834
+Mix CSV:       recipes/training_mix.csv
+Device:        mps
+Seed:          42
+
+Hyperparameters:
+  Batch size:  64
+  Epochs:      30
+  Learning rate: 0.001
+  Num workers: 0
+  n_mels:      64
+  hop_length:  128
+  num_frames:  32
+
+Data:
+  Train samples: 7248
+  Val samples:   1824
+  Num classes (unique MIDI): 32
+
+Classes (MIDI -> class index):
+  class  0: MIDI 40
+  class  1: MIDI 41
+  class  2: MIDI 42
+  class  3: MIDI 43
+  class  4: MIDI 44
+  class  5: MIDI 45
+  class  6: MIDI 46
+  class  7: MIDI 47
+  class  8: MIDI 48
+  class  9: MIDI 49
+  class 10: MIDI 50
+  class 11: MIDI 51
+  class 12: MIDI 52
+  class 13: MIDI 53
+  class 14: MIDI 54
+  class 15: MIDI 55
+  class 16: MIDI 56
+  class 17: MIDI 57
+  class 18: MIDI 58
+  class 19: MIDI 59
+  class 20: MIDI 60
+  class 21: MIDI 61
+  class 22: MIDI 62
+  class 23: MIDI 63
+  class 24: MIDI 64
+  class 25: MIDI 65
+  class 26: MIDI 66
+  class 27: MIDI 67
+  class 28: MIDI 68
+  class 29: MIDI 69
+  class 30: MIDI 70
+  class 31: MIDI 71
+
+Training history:
+  Epoch 01: train_loss=3.1874, train_acc=0.0902, val_loss=2.9113, val_acc=0.1305
+  Epoch 02: train_loss=2.7680, train_acc=0.1774, val_loss=2.7461, val_acc=0.1469
+  Epoch 03: train_loss=2.4328, train_acc=0.2786, val_loss=2.6264, val_acc=0.2396
+  Epoch 04: train_loss=2.1661, train_acc=0.3750, val_loss=2.2020, val_acc=0.3640
+  Epoch 05: train_loss=1.9714, train_acc=0.4592, val_loss=2.6930, val_acc=0.2516
+  Epoch 06: train_loss=1.8498, train_acc=0.4949, val_loss=2.2323, val_acc=0.3383
+  Epoch 07: train_loss=1.7131, train_acc=0.5546, val_loss=1.8861, val_acc=0.4720
+  Epoch 08: train_loss=1.6045, train_acc=0.6003, val_loss=2.4136, val_acc=0.3925
+  Epoch 09: train_loss=1.5358, train_acc=0.6206, val_loss=2.0175, val_acc=0.4501
+  Epoch 10: train_loss=1.4686, train_acc=0.6498, val_loss=2.6552, val_acc=0.3158
+  Epoch 11: train_loss=1.4211, train_acc=0.6620, val_loss=3.3060, val_acc=0.3026
+  Epoch 12: train_loss=1.3750, train_acc=0.6852, val_loss=3.8751, val_acc=0.1957
+  Epoch 13: train_loss=1.3262, train_acc=0.7030, val_loss=2.1604, val_acc=0.4095
+  Epoch 14: train_loss=1.2359, train_acc=0.7412, val_loss=1.2610, val_acc=0.7248
+  Epoch 15: train_loss=1.2087, train_acc=0.7522, val_loss=1.2229, val_acc=0.7319
+  Epoch 16: train_loss=1.1932, train_acc=0.7559, val_loss=1.2449, val_acc=0.7226
+  Epoch 17: train_loss=1.1883, train_acc=0.7619, val_loss=1.2337, val_acc=0.7418
+  Epoch 18: train_loss=1.1778, train_acc=0.7603, val_loss=1.2447, val_acc=0.7215
+  Epoch 19: train_loss=1.1718, train_acc=0.7655, val_loss=1.2382, val_acc=0.7226
+  Epoch 20: train_loss=1.1716, train_acc=0.7648, val_loss=1.2923, val_acc=0.7133
+  Epoch 21: train_loss=1.1649, train_acc=0.7664, val_loss=1.2022, val_acc=0.7401
+  Epoch 22: train_loss=1.1497, train_acc=0.7780, val_loss=1.2304, val_acc=0.7341
+  Epoch 23: train_loss=1.1533, train_acc=0.7721, val_loss=1.2080, val_acc=0.7297
+  Epoch 24: train_loss=1.1362, train_acc=0.7821, val_loss=1.1740, val_acc=0.7533
+  Epoch 25: train_loss=1.1386, train_acc=0.7834, val_loss=1.1716, val_acc=0.7516
+  Epoch 26: train_loss=1.1313, train_acc=0.7828, val_loss=1.1745, val_acc=0.7555
+  Epoch 27: train_loss=1.1302, train_acc=0.7871, val_loss=1.1655, val_acc=0.7549
+  Epoch 28: train_loss=1.1347, train_acc=0.7809, val_loss=1.1702, val_acc=0.7495
+  Epoch 29: train_loss=1.1341, train_acc=0.7779, val_loss=1.1767, val_acc=0.7456
+  Epoch 30: train_loss=1.1300, train_acc=0.7794, val_loss=1.1670, val_acc=0.7500
+
+Best epoch:
+  Epoch:     26
+  Val loss:  1.1745
+  Val acc:   0.7555
+
+Confusion matrix (rows=true, cols=pred):
+[[ 8  0  0 ...  0  0  0]
+ [ 0 26  2 ...  0  0  0]
+ [ 0  0 29 ...  0  0  0]
+ ...
+ [ 0  0  0 ... 38  0  0]
+ [ 0  0  0 ...  0 37  0]
+ [ 0  0  0 ...  0  0 38]]

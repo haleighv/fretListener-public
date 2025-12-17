@@ -279,6 +279,10 @@ class TrainGUI(tk.Tk):
         self.ckpt_name_var = tk.StringVar(value="note_cnn_best.pt")
         self.train_script_var = tk.StringVar(value=str((_project_root() / "src" / "train_note_model.py")))
 
+        self.n_mels_var = tk.StringVar(value="48")
+        self.hop_length_var = tk.StringVar(value="256")
+        self.num_frames_var = tk.StringVar(value="32")
+
         grid = ttk.Frame(train_frame)
         grid.pack(fill="x")
 
@@ -331,6 +335,29 @@ class TrainGUI(tk.Tk):
             self.ckpt_name_entry,
             "Filename of the best checkpoint saved inside the run artifacts directory.\n"
             "This is passed to the training script as --checkpoint-name."
+        )
+
+        self.n_mels_entry = add_field(2, 0, "n_mels", self.n_mels_var)
+        self.hop_length_entry = add_field(2, 2, "hop_length", self.hop_length_var)
+        self.num_frames_entry = add_field(2, 4, "num_frames", self.num_frames_var)
+
+        ToolTip(
+            self.n_mels_entry,
+            "Mel bins in the spectrogram.\n"
+            "Higher can improve pitch resolution but increases compute.\n"
+            "Common: 48, 64, 80."
+        )
+        ToolTip(
+            self.hop_length_entry,
+            "Hop length (samples) between spectrogram frames.\n"
+            "Lower = more time resolution, more frames/compute.\n"
+            "Common: 128, 256."
+        )
+        ToolTip(
+            self.num_frames_entry,
+            "Fixed number of time frames used as model input.\n"
+            "Spectrogram is cropped/padded to this length.\n"
+            "Must match ONNX export shape."
         )
 
         ttk.Label(grid, text="Train script").grid(row=1, column=4, sticky="w", padx=(0, 8), pady=3)
@@ -652,6 +679,9 @@ class TrainGUI(tk.Tk):
                     "--num-workers", (self.num_workers_var.get() or "0").strip(),
                     "--seed", (self.train_seed_var.get() or "42").strip(),
                     "--checkpoint-name", (self.ckpt_name_var.get() or "note_cnn_best.pt").strip(),
+                    "--n-mels", (self.n_mels_var.get() or "48").strip(),
+                    "--hop-length", (self.hop_length_var.get() or "256").strip(),
+                    "--num-frames", (self.num_frames_var.get() or "32").strip(),
                 ]
 
                 self._log("Starting training...")

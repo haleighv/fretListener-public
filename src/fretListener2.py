@@ -963,23 +963,39 @@ class NoteInferenceGUI:
                 cs['recorded_post'] = 0
                 cs['pre_idx'] = 0
 
-    def _apply_fades(self, audio: np.ndarray, sr: int, fade_ms: float = 5.0) -> np.ndarray:
-        """Apply short fade-in and fade-out to eliminate edge discontinuities."""
-        fade_samples = int(sr * fade_ms / 1000.0)
-        fade_samples = min(fade_samples, len(audio) // 4)  # Don't fade more than 25% of audio
+    def _apply_fades(self, audio: np.ndarray, sr: int, fade_ms: float = 3.0) -> np.ndarray:
+        """Apply preprocessing to match data_collection.py output:
+        1. DC offset removal
+        2. High-pass filter (~20Hz cutoff)
+        3. Raised cosine fade-in/fade-out
+        """
+        # 1. Remove DC offset
+        audio = audio - np.mean(audio)
         
-        if fade_samples < 2:
-            return audio
+        # 2. Apply simple high-pass filter to remove rumble (cutoff ~20Hz)
+        alpha = 0.995
+        filtered = np.zeros_like(audio)
+        filtered[0] = audio[0]
+        for i in range(1, len(audio)):
+            filtered[i] = alpha * (filtered[i-1] + audio[i] - audio[i-1])
+        audio = filtered
         
-        audio = audio.copy()
+        # 3. Create smooth fade windows (raised cosine, matching data_collection.py)
+        fade_samples = int(sr * fade_ms / 1000)
+        fade_samples = min(fade_samples, len(audio) // 4)  # Don't fade more than 25%
         
-        # Fade-in (first few ms)
-        fade_in = np.linspace(0.0, 1.0, fade_samples, dtype=np.float32)
-        audio[:fade_samples] *= fade_in
-        
-        # Fade-out (last few ms)  
-        fade_out = np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
-        audio[-fade_samples:] *= fade_out
+        if fade_samples > 0:
+            # Raised cosine fades (smoother than linear)
+            fade_in = 0.5 * (1 - np.cos(np.pi * np.arange(fade_samples) / fade_samples))
+            fade_out = 0.5 * (1 + np.cos(np.pi * np.arange(fade_samples) / fade_samples))
+            fade_in = fade_in.astype(np.float32)
+            fade_out = fade_out.astype(np.float32)
+            
+            # Apply fade-in at start
+            audio[:fade_samples] *= fade_in
+            
+            # Apply fade-out at end
+            audio[-fade_samples:] *= fade_out
         
         return audio
 
@@ -1218,11 +1234,14 @@ class NoteInferenceGUI:
             raw_path = save_dir / f"cap_{ts}_raw.wav"
             self._save_wav_int16(raw_path, sr, captured)
             
-            win = best_window
+            win = best_window.copy()
             if win.shape[0] < attack:
                 win = np.pad(win, (0, attack - win.shape[0]), mode='constant')
             else:
                 win = win[:attack]
+            
+            # Apply same preprocessing as training data (DC removal, HPF, fades)
+            win = self._apply_fades(win, sr)
             
             best_path = save_dir / f"cap_{ts}_best_{name}_prob{prob:.2f}.wav"
             self._save_wav_int16(best_path, sr, win)

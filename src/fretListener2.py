@@ -47,7 +47,7 @@ from string_model import StringCNN
 # VERSION
 # ============================
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 
 # ============================
@@ -305,7 +305,7 @@ class NoteInferenceGUI:
         # Default parameters
         self.params = {
             'note_checkpoint': 'artifacts/models/note_20251211_164726/note_cnn_best.pt',
-            'string_checkpoint': 'artifacts/models/string_20251216_000000/string_cnn_best.pt',
+            'string_checkpoint': 'artifacts/models/string_20251217_135254/string_cnn_best.pt',
             'trigger_threshold': 0.01,
             'pre_ms': 50.0,
             'post_ms': 500.0,
@@ -830,14 +830,17 @@ class NoteInferenceGUI:
                 if status:
                     print(f"Audio status: {status}")
                 
+                # Extract mono channel
                 if indata.ndim == 2:
                     mono = indata[:, ch].astype(np.float32, copy=True)
                 else:
                     mono = indata.astype(np.float32, copy=True)
                 
+                # Update monitor buffer
                 if self.monitor_enabled:
                     self.monitor_audio = mono
                 
+                # Queue for processing
                 self.audio_queue.put((indata.copy(), mono))
             
             def output_callback(outdata, frames, time_info, status):
@@ -883,7 +886,8 @@ class NoteInferenceGUI:
             self.root.after(10, self._process_audio_queue)
             
         except Exception as e:
-            self._send_message('error', f"Failed to start: {e}")
+            import traceback
+            self._send_message('error', f"Failed to start: {e}\n{traceback.format_exc()}")
             self.is_running = False
 
     def _process_audio_queue(self):
@@ -934,6 +938,9 @@ class NoteInferenceGUI:
                 elif cap.shape[0] < cs['capture_total']:
                     cap = np.pad(cap, (0, cs['capture_total'] - cap.shape[0]), mode='constant')
                 
+                # Apply fade-in/fade-out to eliminate edge pops
+                cap = self._apply_fades(cap, cs['sr'])
+                
                 self.status_var.set("Processing...")
                 self.status_light.set_state("processing")
                 self._process_captured_audio(cap)
@@ -955,6 +962,26 @@ class NoteInferenceGUI:
                 cs['recording_parts'] = []
                 cs['recorded_post'] = 0
                 cs['pre_idx'] = 0
+
+    def _apply_fades(self, audio: np.ndarray, sr: int, fade_ms: float = 5.0) -> np.ndarray:
+        """Apply short fade-in and fade-out to eliminate edge discontinuities."""
+        fade_samples = int(sr * fade_ms / 1000.0)
+        fade_samples = min(fade_samples, len(audio) // 4)  # Don't fade more than 25% of audio
+        
+        if fade_samples < 2:
+            return audio
+        
+        audio = audio.copy()
+        
+        # Fade-in (first few ms)
+        fade_in = np.linspace(0.0, 1.0, fade_samples, dtype=np.float32)
+        audio[:fade_samples] *= fade_in
+        
+        # Fade-out (last few ms)  
+        fade_out = np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
+        audio[-fade_samples:] *= fade_out
+        
+        return audio
 
     def _update_prebuffer(self, block):
         """Update circular pre-buffer."""
@@ -1017,6 +1044,7 @@ class NoteInferenceGUI:
                 self.status_var.set("Filtered")
                 return
         
+        # Sweep for best window using note model
         best_start, best_window, best_note_topk = self._sweep_best_window_note(
             captured=captured,
             sweep_step_samples=cs['sweep_step_samples'],
@@ -1027,6 +1055,7 @@ class NoteInferenceGUI:
             self._log("No note candidates found")
             return
 
+        # Run string model on the SAME best window
         best_string_topk = self._predict_topk_string(best_window, topk=max(2, self.params['topk']))
 
         midi, name, note_prob, note_reason, note_ambig, f0_hz = self._decide_with_margin_and_pitch(
@@ -1050,7 +1079,6 @@ class NoteInferenceGUI:
         open_name = self._string_open_name(final_string_idx)
         self.midi_var.set(f"MIDI: {midi} | String: {disp_s} ({open_name}) | Fret: {final_fret}")
 
-
         reasons = []
         if note_ambig:
             reasons.append(f"note:{note_reason}")
@@ -1064,43 +1092,45 @@ class NoteInferenceGUI:
         self.status_light.set_state("detected")
 
         topk_note_str = ", ".join([f"{n}({p:.2f})" for m, n, p in best_note_topk[:self.params['topk']]])
-        topk_str_str = ", ".join([f"S{self._to_display_string_num(si)}({p:.2f})"for si, sn, p in best_string_topk[:self.params['topk']]])
+        topk_str_str = ", ".join([f"S{self._to_display_string_num(si)}({p:.2f})" for si, sn, p in best_string_topk[:self.params['topk']]])
 
         disp_s = self._to_display_string_num(final_string_idx)
         self._log(f"Detected: {name} | Pos: S{disp_s} F{final_fret} | NoteTopK: {topk_note_str} | StringTopK: {topk_str_str}")
-
 
         if self.params['save_dir']:
             self._save_captured_audio(captured, best_window, f"{name}_S{final_string_idx+1}_F{final_fret}", note_prob)
 
     def _resolve_position(self, midi: int, string_idx_pred: int, string_topk):
+        """Resolve final (string, fret) position from note and string predictions.
+        
+        Priority:
+        1. Trust the string model's prediction if it yields a valid fret
+        2. Try other strings by probability order
+        3. Fall back to lowest valid fret position
+        """
         tuning = GuitarFretboard.STANDARD_TUNING
         max_fret = int(self.fretboard.frets)
 
-        # 1. Prefer ANY open string that exactly matches MIDI
-        for si in range(6):
-            if midi == tuning[si]:
-                return si, 0, "pos: open_string"
-
-        # 2. Try predicted string first
+        # 1. Try predicted string first (trust the model!)
         fret = midi - tuning[string_idx_pred]
         if 0 <= fret <= max_fret:
             return string_idx_pred, fret, ""
 
-        # 3. Try remaining strings by probability
+        # 2. Try remaining strings by probability
         for si, _, _ in string_topk:
+            if si == string_idx_pred:
+                continue  # already tried
             fret = midi - tuning[si]
             if 0 <= fret <= max_fret:
                 return si, fret, "pos: string_fallback"
 
-        # 4. Final fallback: lowest fret
+        # 3. Final fallback: any valid position, prefer lowest fret
         best = None
         for si in range(6):
             fret = midi - tuning[si]
             if 0 <= fret <= max_fret:
-                cand = (fret, si)
-                if best is None or cand < best:
-                    best = cand
+                if best is None or fret < best[0]:
+                    best = (fret, si)
 
         if best:
             fret, si = best
@@ -1297,13 +1327,11 @@ class NoteInferenceGUI:
 
         # ---- NOTE MODEL ----
         note_mel_params = note_ckpt["mel_params"]
-        # Handle different checkpoint key names for note model
         if "num_classes" in note_ckpt:
             note_num_classes = int(note_ckpt["num_classes"])
         elif "n_classes" in note_ckpt:
             note_num_classes = int(note_ckpt["n_classes"])
         else:
-            # Try to infer from idx_to_midi
             if "idx_to_midi" in note_ckpt:
                 note_num_classes = len(note_ckpt["idx_to_midi"])
             else:
@@ -1335,13 +1363,13 @@ class NoteInferenceGUI:
 
         # ---- STRING MODEL ----
         string_mel_params = string_ckpt["mel_params"]
-        # Handle different checkpoint key names for string model
-        if "num_classes" in string_ckpt:
+        if "num_strings" in string_ckpt:
+            string_num_classes = int(string_ckpt["num_strings"])
+        elif "num_classes" in string_ckpt:
             string_num_classes = int(string_ckpt["num_classes"])
         elif "n_classes" in string_ckpt:
             string_num_classes = int(string_ckpt["n_classes"])
         else:
-            # Default to 6 strings for guitar
             string_num_classes = 6
         string_n_mels = int(string_mel_params["n_mels"])
 
@@ -1447,7 +1475,18 @@ class NoteInferenceGUI:
         return out
 
     def _predict_topk_string(self, window_1d, topk, peak_normalize=True) -> List[Tuple[int, str, float]]:
-        """Run STRING model inference on a window. Returns (string_idx, string_label, prob)."""
+        """Run STRING model inference on a window. Returns (string_idx, string_label, prob).
+        
+        Training data convention:
+          CSV string 1 = high E (E4) -> model class 0
+          CSV string 6 = low E (E2) -> model class 5
+          
+        Internal convention (for fretboard display):
+          string_idx 0 = low E (E2)
+          string_idx 5 = high E (E4)
+          
+        So we need to invert: model_class 0 -> string_idx 5, model_class 5 -> string_idx 0
+        """
         w = self._peak_normalize(window_1d) if peak_normalize else window_1d.astype(np.float32)
 
         state = self.state
@@ -1467,19 +1506,23 @@ class NoteInferenceGUI:
         k = min(int(topk), probs_cpu.shape[1])
         vals, idxs = torch.topk(probs_cpu, k=k, dim=1)
 
-        # string_idx convention: 0=low E ... 5=high E
-        string_names = ["E2", "A2", "D3", "G3", "B3", "E4"]
+        # Model class to string name (model class 0 = CSV string 1 = high E)
+        model_class_to_name = ["E4", "B3", "G3", "D3", "A2", "E2"]
 
         out: List[Tuple[int, str, float]] = []
         for p, idx in zip(vals[0].tolist(), idxs[0].tolist()):
-            # TRAINING USED 1-based STRING LABELS → REMAP BACK TO 0-BASED
-            si = int(idx) - 1
-
-            if not (0 <= si < 6):
+            model_class = int(idx)
+            
+            if not (0 <= model_class < 6):
                 continue  # safety guard
 
-            label = string_names[si]
-            out.append((si, label, float(p)))
+            # Convert model class to internal string_idx (invert the order)
+            # model_class 0 (high E) -> string_idx 5
+            # model_class 5 (low E) -> string_idx 0
+            string_idx = 5 - model_class
+            
+            label = model_class_to_name[model_class]
+            out.append((string_idx, label, float(p)))
 
         return out
 

@@ -1,0 +1,119 @@
+String CNN Training Summary
+===========================
+
+Run directory: artifacts/models/string_20251217_135254
+Mix CSV:       recipes/string_training_mix.csv
+Device:        mps
+Seed:          42
+Timestamp:     2025-12-17T14:04:12
+
+Repro / Environment:
+  Python:      3.11.5
+  Platform:    macOS-10.16-x86_64-i386-64bit
+  Torch:       2.2.2
+  Torchaudio:  2.2.2
+
+Command:
+  src/train_string_model.py --mix-csv recipes/string_training_mix.csv --batch-size 64 --epochs 30 --lr 1e-3 --num-workers 0 --seed 42 --checkpoint-name string_cnn_best.pt --n-mels 64 --hop-length 128 --num-frames 96
+
+Hyperparameters (CLI):
+  Batch size:  64
+  Epochs:      30
+  Learning rate (initial): 0.001
+  Num workers: 0
+  n_mels:      64
+  hop_length:  128
+  num_frames:  96
+  label_smoothing: 0.05
+
+Dataset params (fixed/defaults):
+  sample_rate: 48000
+  attack_duration_sec: 0.25
+  attack_samples: 12000
+  n_fft: 1024
+  hop_length: 128
+  n_mels: 64
+  f_min: 55.0
+  f_max: 3000.0
+  num_frames: 96
+  augment: 0
+  detected_label_base: 1  # 0=>0..5, 1=>1..6 in CSV
+
+Model params:
+  model_class: StringCNN
+  num_strings: 6
+  dropout_p: 0.3
+
+Optimizer:
+  optimizer: Adam
+  lr_initial: 0.001
+
+LR Scheduler:
+  scheduler: ReduceLROnPlateau
+  mode: max
+  factor: 0.1
+  patience: 5
+  step_metric: val_acc
+
+Data:
+  Train samples: 7258
+  Val samples:   1814
+  Num classes (strings): 6
+
+Label counts (after normalization; labels are 0..5):
+  Train: [1202, 1223, 1237, 1176, 1206, 1214]
+  Val:   [310, 289, 275, 336, 306, 298]
+
+Training history:
+  Epoch 01: train_loss=1.3526, train_acc=0.4835, val_loss=1.1040, val_acc=0.5209, lr=0.001
+  Epoch 02: train_loss=0.9649, train_acc=0.6680, val_loss=0.8427, val_acc=0.7255, lr=0.001
+  Epoch 03: train_loss=0.8437, train_acc=0.7235, val_loss=0.9006, val_acc=0.6510, lr=0.001
+  Epoch 04: train_loss=0.7773, train_acc=0.7556, val_loss=0.7859, val_acc=0.7426, lr=0.001
+  Epoch 05: train_loss=0.7246, train_acc=0.7920, val_loss=0.7323, val_acc=0.7536, lr=0.001
+  Epoch 06: train_loss=0.6811, train_acc=0.8144, val_loss=1.0113, val_acc=0.6626, lr=0.001
+  Epoch 07: train_loss=0.6462, train_acc=0.8393, val_loss=1.0292, val_acc=0.6213, lr=0.001
+  Epoch 08: train_loss=0.6313, train_acc=0.8392, val_loss=0.7697, val_acc=0.7663, lr=0.001
+  Epoch 09: train_loss=0.5909, train_acc=0.8677, val_loss=0.7704, val_acc=0.7404, lr=0.001
+  Epoch 10: train_loss=0.5758, train_acc=0.8760, val_loss=1.1129, val_acc=0.6422, lr=0.001
+  Epoch 11: train_loss=0.5608, train_acc=0.8840, val_loss=0.5705, val_acc=0.8644, lr=0.001
+  Epoch 12: train_loss=0.5472, train_acc=0.8927, val_loss=0.8368, val_acc=0.7547, lr=0.001
+  Epoch 13: train_loss=0.5398, train_acc=0.8960, val_loss=0.8586, val_acc=0.7200, lr=0.001
+  Epoch 14: train_loss=0.5227, train_acc=0.9087, val_loss=0.7521, val_acc=0.7690, lr=0.001
+  Epoch 15: train_loss=0.5294, train_acc=0.9001, val_loss=0.5660, val_acc=0.8517, lr=0.001
+  Epoch 16: train_loss=0.5101, train_acc=0.9117, val_loss=0.5712, val_acc=0.8589, lr=0.001
+  Epoch 17: train_loss=0.4977, train_acc=0.9158, val_loss=0.5286, val_acc=0.8875, lr=0.001
+  Epoch 18: train_loss=0.4858, train_acc=0.9259, val_loss=0.8042, val_acc=0.7663, lr=0.001
+  Epoch 19: train_loss=0.4827, train_acc=0.9263, val_loss=0.4923, val_acc=0.9079, lr=0.001
+  Epoch 20: train_loss=0.4808, train_acc=0.9268, val_loss=0.4733, val_acc=0.9074, lr=0.001
+  Epoch 21: train_loss=0.4653, train_acc=0.9326, val_loss=0.7037, val_acc=0.8214, lr=0.001
+  Epoch 22: train_loss=0.4605, train_acc=0.9366, val_loss=0.7317, val_acc=0.8065, lr=0.001
+  Epoch 23: train_loss=0.4489, train_acc=0.9450, val_loss=0.7340, val_acc=0.7850, lr=0.001
+  Epoch 24: train_loss=0.4565, train_acc=0.9391, val_loss=0.6155, val_acc=0.8440, lr=0.001
+  Epoch 25: train_loss=0.4526, train_acc=0.9409, val_loss=0.8710, val_acc=0.7111, lr=0.001
+  Epoch 26: train_loss=0.4206, train_acc=0.9573, val_loss=0.3795, val_acc=0.9675, lr=0.0001
+  Epoch 27: train_loss=0.4099, train_acc=0.9671, val_loss=0.3780, val_acc=0.9724, lr=0.0001
+  Epoch 28: train_loss=0.4095, train_acc=0.9650, val_loss=0.3837, val_acc=0.9636, lr=0.0001
+  Epoch 29: train_loss=0.4149, train_acc=0.9611, val_loss=0.3832, val_acc=0.9724, lr=0.0001
+  Epoch 30: train_loss=0.4102, train_acc=0.9632, val_loss=0.3784, val_acc=0.9702, lr=0.0001
+
+Best epoch:
+  Epoch:     27
+  Val loss:  0.3780
+  Val acc:   0.9724
+
+Confusion matrix (rows=true, cols=pred):
+[[309   1   0   0   0   0]
+ [  4 284   1   0   0   0]
+ [  0   4 266   5   0   0]
+ [  0   0  13 320   3   0]
+ [  0   0   1   8 294   3]
+ [  0   0   0   0   7 291]]
+
+Figures written:
+  - loss_curves.png
+  - accuracy_curves.png
+  - lr_curve.png
+  - confusion_matrix.png
+  - per_class_accuracy.png
+  - string_cnn.onnx
+

@@ -36,6 +36,39 @@ python src/train_string_model.py \
   --num-frames 96
 """
 # -----------------------------
+# Ambiguous position detection
+# -----------------------------
+
+# Positions where open strings share pitch with fretted notes on adjacent strings
+AMBIGUOUS_POSITIONS = {
+    (1, 0),  # Open E4
+    (2, 0),  # Open B3
+    (3, 0),  # Open G3
+    (4, 0),  # Open D3
+    (5, 0),  # Open A2
+    (2, 5),  # B string fret 5 = E4
+    (3, 4),  # G string fret 4 = B3
+    (4, 5),  # D string fret 5 = G3
+    (5, 5),  # A string fret 5 = D3
+    (6, 5),  # E string fret 5 = A2
+}
+
+
+def count_ambiguous_samples(rows: List[dict]) -> int:
+    """Count how many samples are from ambiguous positions."""
+    count = 0
+    for row in rows:
+        try:
+            string = int(row.get("string", 0))
+            fret = int(row.get("fret", 0))
+            if (string, fret) in AMBIGUOUS_POSITIONS:
+                count += 1
+        except (ValueError, TypeError):
+            pass
+    return count
+
+
+# -----------------------------
 # Device selection
 # -----------------------------
 
@@ -508,6 +541,8 @@ def write_summary(
     figures: List[str],
     label_counts_train: np.ndarray,
     label_counts_val: np.ndarray,
+    train_ambiguous: int = 0,
+    val_ambiguous: int = 0,
 ) -> None:
     summary_path = run_dir / "summary.txt"
     with summary_path.open("w") as f:
@@ -570,7 +605,9 @@ def write_summary(
         f.write("Data:\n")
         f.write(f"  Train samples: {train_len}\n")
         f.write(f"  Val samples:   {val_len}\n")
-        f.write("  Num classes (strings): 6\n\n")
+        f.write("  Num classes (strings): 6\n")
+        f.write(f"  Train ambiguous samples: {train_ambiguous} ({100*train_ambiguous/train_len:.1f}%)\n")
+        f.write(f"  Val ambiguous samples:   {val_ambiguous} ({100*val_ambiguous/val_len:.1f}%)\n\n")
 
         f.write("Label counts (after normalization; labels are 0..5):\n")
         f.write(f"  Train: {label_counts_train.tolist()}\n")
@@ -659,6 +696,12 @@ def main():
     shutil.copy2(mix_csv, run_dir / "training_mix.csv")
 
     train_rows, val_rows = load_mix_csv(mix_csv)
+
+    # Log ambiguous sample counts
+    train_ambiguous = count_ambiguous_samples(train_rows)
+    val_ambiguous = count_ambiguous_samples(val_rows)
+    print(f"Ambiguous samples: {train_ambiguous} train, {val_ambiguous} val "
+          f"({100*train_ambiguous/len(train_rows):.1f}% / {100*val_ambiguous/len(val_rows):.1f}%)")
 
     train_ds = StringDatasetFromMix(
         train_rows,
@@ -818,6 +861,8 @@ def main():
         figures=figures,
         label_counts_train=label_counts_train,
         label_counts_val=label_counts_val,
+        train_ambiguous=train_ambiguous,
+        val_ambiguous=val_ambiguous,
     )
 
     print("Artifacts written to:", run_dir)

@@ -261,6 +261,7 @@ class TrainGUI(tk.Tk):
         # String mode variables
         self.max_per_string_var = tk.StringVar(value="")
         self.stratify_fret_var = tk.BooleanVar(value=True)
+        self.ambiguous_multiplier_var = tk.StringVar(value="1.0")
         self.string_mix_output_var = tk.StringVar(value=str((_project_root() / "recipes" / "string_training_mix.csv")))
 
         # Build both parameter panels (we'll show/hide)
@@ -472,6 +473,24 @@ class TrainGUI(tk.Tk):
             "When enabled, samples are selected round-robin across frets\n"
             "within each string, ensuring fret diversity.\n"
             "Recommended for better generalization."
+        )
+        row += 1
+
+        ttk.Label(self.string_mix_frame, text="Ambiguous multiplier").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        self.ambiguous_multiplier_entry = ttk.Entry(self.string_mix_frame, textvariable=self.ambiguous_multiplier_var, width=24)
+        self.ambiguous_multiplier_entry.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ToolTip(
+            self.ambiguous_multiplier_entry,
+            "Oversample ambiguous positions (open strings & their fretted equivalents).\n"
+            "1.0 = no oversampling (default)\n"
+            "2.0 = 2x samples from ambiguous positions\n"
+            "3.0 = 3x samples from ambiguous positions\n\n"
+            "Ambiguous pairs (same pitch):\n"
+            "  • Open E4 (s1,f0) ↔ B string fret 5 (s2,f5)\n"
+            "  • Open B3 (s2,f0) ↔ G string fret 4 (s3,f4)\n"
+            "  • Open G3 (s3,f0) ↔ D string fret 5 (s4,f5)\n"
+            "  • Open D3 (s4,f0) ↔ A string fret 5 (s5,f5)\n"
+            "  • Open A2 (s5,f0) ↔ E string fret 5 (s6,f5)"
         )
         row += 1
 
@@ -809,6 +828,7 @@ class TrainGUI(tk.Tk):
                 train_ratio = self._parse_float(self.train_ratio_var.get())
                 seed = int((self.mix_seed_var.get() or "42").strip())
                 stratify_by_fret = self.stratify_fret_var.get()
+                ambiguous_multiplier = self._parse_float(self.ambiguous_multiplier_var.get() or "1.0")
                 output_csv = Path(self.string_mix_output_var.get()).expanduser().resolve()
 
                 tools_dir = _project_root() / "tools"
@@ -828,11 +848,12 @@ class TrainGUI(tk.Tk):
                 for p in dataset_roots:
                     self._log(f"  - {p}")
 
-                self._log(f"Max per string:      {max_per_string if max_per_string is not None else 'no cap'}")
-                self._log(f"Train ratio:         {train_ratio}")
-                self._log(f"Stratify by fret:    {stratify_by_fret}")
-                self._log(f"Seed:                {seed}")
-                self._log(f"Output:              {output_csv}")
+                self._log(f"Max per string:        {max_per_string if max_per_string is not None else 'no cap'}")
+                self._log(f"Train ratio:           {train_ratio}")
+                self._log(f"Stratify by fret:      {stratify_by_fret}")
+                self._log(f"Ambiguous multiplier:  {ambiguous_multiplier}")
+                self._log(f"Seed:                  {seed}")
+                self._log(f"Output:                {output_csv}")
 
                 bstm.build_string_training_mix(
                     dataset_roots=dataset_roots,
@@ -841,6 +862,7 @@ class TrainGUI(tk.Tk):
                     output_csv=output_csv,
                     seed=seed,
                     stratify_by_fret=stratify_by_fret,
+                    ambiguous_multiplier=ambiguous_multiplier,
                 )
                 self._log("String training mix build complete.")
             except Exception as e:

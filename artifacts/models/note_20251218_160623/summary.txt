@@ -1,0 +1,151 @@
+Note CNN Training Summary
+=========================
+
+Run directory: artifacts/models/note_20251218_160623
+Mix CSV:       recipes/training_mix2.csv
+Device:        mps
+Seed:          42
+Timestamp:     2025-12-18T16:25:47
+
+Repro / Environment:
+  Python:      3.11.5
+  Platform:    macOS-10.16-x86_64-i386-64bit
+  Torch:       2.2.2
+  Torchaudio:  2.2.2
+
+Command:
+  src/train_note_model.py --mix-csv recipes/training_mix2.csv --batch-size 64 --epochs 30 --lr 1e-3 --num-workers 0 --seed 42 --checkpoint-name note_cnn_best.pt --n-mels 64 --hop-length 128 --num-frames 96
+
+Hyperparameters (CLI):
+  Batch size:  64
+  Epochs:      30
+  Learning rate (initial): 0.001
+  Num workers: 0
+  n_mels:      64
+  hop_length:  128
+  num_frames:  96
+
+Dataset params (fixed/defaults):
+  attack_duration_sec: 0.25
+  attack_samples: 12000.0
+  augment: 0.0
+  f_max: 3000.0
+  f_min: 55.0
+  hop_length: 128.0
+  n_fft: 1024.0
+  n_mels: 64.0
+  num_frames: 96.0
+  sample_rate: 48000.0
+
+Model params:
+  dropout_p: 0.3
+  model_class: NoteCNN
+  num_classes: 37.0
+
+Optimizer:
+  lr_initial: 0.001
+  optimizer: Adam
+
+LR Scheduler:
+  factor: 0.1
+  mode: max
+  patience: 5.0
+  scheduler: ReduceLROnPlateau
+  step_metric: val_acc
+
+Data:
+  Train samples: 9754
+  Val samples:   2438
+  Num classes (unique MIDI): 37
+
+Classes (MIDI -> class index):
+  class  0: MIDI 40
+  class  1: MIDI 41
+  class  2: MIDI 42
+  class  3: MIDI 43
+  class  4: MIDI 44
+  class  5: MIDI 45
+  class  6: MIDI 46
+  class  7: MIDI 47
+  class  8: MIDI 48
+  class  9: MIDI 49
+  class 10: MIDI 50
+  class 11: MIDI 51
+  class 12: MIDI 52
+  class 13: MIDI 53
+  class 14: MIDI 54
+  class 15: MIDI 55
+  class 16: MIDI 56
+  class 17: MIDI 57
+  class 18: MIDI 58
+  class 19: MIDI 59
+  class 20: MIDI 60
+  class 21: MIDI 61
+  class 22: MIDI 62
+  class 23: MIDI 63
+  class 24: MIDI 64
+  class 25: MIDI 65
+  class 26: MIDI 66
+  class 27: MIDI 67
+  class 28: MIDI 68
+  class 29: MIDI 69
+  class 30: MIDI 70
+  class 31: MIDI 71
+  class 32: MIDI 72
+  class 33: MIDI 73
+  class 34: MIDI 74
+  class 35: MIDI 75
+  class 36: MIDI 76
+
+Training history:
+  Epoch 01: train_loss=2.8487, train_acc=0.1760, val_loss=2.8308, val_acc=0.0931, lr=0.001
+  Epoch 02: train_loss=1.8449, train_acc=0.4940, val_loss=1.4750, val_acc=0.6600, lr=0.001
+  Epoch 03: train_loss=1.2857, train_acc=0.7299, val_loss=1.4832, val_acc=0.5742, lr=0.001
+  Epoch 04: train_loss=1.0642, train_acc=0.8100, val_loss=1.2122, val_acc=0.7149, lr=0.001
+  Epoch 05: train_loss=0.8941, train_acc=0.8776, val_loss=1.0045, val_acc=0.8150, lr=0.001
+  Epoch 06: train_loss=0.8204, train_acc=0.9046, val_loss=0.9468, val_acc=0.8179, lr=0.001
+  Epoch 07: train_loss=0.7642, train_acc=0.9236, val_loss=0.8816, val_acc=0.8450, lr=0.001
+  Epoch 08: train_loss=0.7112, train_acc=0.9430, val_loss=2.4949, val_acc=0.4098, lr=0.001
+  Epoch 09: train_loss=0.6870, train_acc=0.9481, val_loss=1.2444, val_acc=0.7145, lr=0.001
+  Epoch 10: train_loss=0.6389, train_acc=0.9670, val_loss=1.2524, val_acc=0.7022, lr=0.001
+  Epoch 11: train_loss=0.6106, train_acc=0.9740, val_loss=1.1873, val_acc=0.7317, lr=0.001
+  Epoch 12: train_loss=0.5999, train_acc=0.9743, val_loss=1.1114, val_acc=0.7363, lr=0.001
+  Epoch 13: train_loss=0.5809, train_acc=0.9818, val_loss=0.7625, val_acc=0.9028, lr=0.001
+  Epoch 14: train_loss=0.5907, train_acc=0.9759, val_loss=0.9905, val_acc=0.8175, lr=0.001
+  Epoch 15: train_loss=0.5537, train_acc=0.9856, val_loss=0.5160, val_acc=0.9873, lr=0.001
+  Epoch 16: train_loss=0.5538, train_acc=0.9839, val_loss=0.7664, val_acc=0.8958, lr=0.001
+  Epoch 17: train_loss=0.5460, train_acc=0.9869, val_loss=0.5783, val_acc=0.9668, lr=0.001
+  Epoch 18: train_loss=0.5288, train_acc=0.9902, val_loss=0.6279, val_acc=0.9545, lr=0.001
+  Epoch 19: train_loss=0.5260, train_acc=0.9913, val_loss=0.6708, val_acc=0.9307, lr=0.001
+  Epoch 20: train_loss=0.5198, train_acc=0.9909, val_loss=0.5894, val_acc=0.9619, lr=0.001
+  Epoch 21: train_loss=0.5122, train_acc=0.9917, val_loss=0.6460, val_acc=0.9508, lr=0.0001
+  Epoch 22: train_loss=0.4896, train_acc=0.9974, val_loss=0.4474, val_acc=0.9947, lr=0.0001
+  Epoch 23: train_loss=0.4859, train_acc=0.9984, val_loss=0.4489, val_acc=0.9963, lr=0.0001
+  Epoch 24: train_loss=0.4846, train_acc=0.9976, val_loss=0.4428, val_acc=0.9975, lr=0.0001
+  Epoch 25: train_loss=0.4859, train_acc=0.9978, val_loss=0.4446, val_acc=0.9967, lr=0.0001
+  Epoch 26: train_loss=0.4826, train_acc=0.9973, val_loss=0.4439, val_acc=0.9963, lr=0.0001
+  Epoch 27: train_loss=0.4819, train_acc=0.9983, val_loss=0.4425, val_acc=0.9963, lr=0.0001
+  Epoch 28: train_loss=0.4830, train_acc=0.9978, val_loss=0.4528, val_acc=0.9947, lr=0.0001
+  Epoch 29: train_loss=0.4800, train_acc=0.9991, val_loss=0.4399, val_acc=0.9967, lr=0.0001
+  Epoch 30: train_loss=0.4816, train_acc=0.9973, val_loss=0.4424, val_acc=0.9979, lr=0.0001
+
+Best epoch:
+  Epoch:     30
+  Val loss:  0.4424
+  Val acc:   0.9979
+
+Confusion matrix (rows=true, cols=pred):
+[[31  0  0 ...  0  0  0]
+ [ 2 48  0 ...  0  0  0]
+ [ 0  1 44 ...  0  0  0]
+ ...
+ [ 0  0  0 ... 10  0  0]
+ [ 0  0  0 ...  0 10  0]
+ [ 0  0  0 ...  0  0 10]]
+
+Figures written:
+  - loss_curves.png
+  - accuracy_curves.png
+  - lr_curve.png
+  - confusion_matrix.png
+  - per_class_accuracy.png

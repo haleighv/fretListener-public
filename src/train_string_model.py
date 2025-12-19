@@ -22,6 +22,52 @@ import matplotlib.pyplot as plt
 
 from string_model import StringCNN
 
+"""
+python src/train_string_model.py \
+  --mix-csv recipes/training_mix.csv \
+  --batch-size 64 \
+  --epochs 30 \
+  --lr 1e-3 \
+  --num-workers 0 \
+  --seed 42 \
+  --checkpoint-name string_cnn_best.pt \
+  --n-mels 64 \
+  --hop-length 128 \
+  --num-frames 96
+"""
+# -----------------------------
+# Ambiguous position detection
+# -----------------------------
+
+# Positions where open strings share pitch with fretted notes on adjacent strings
+AMBIGUOUS_POSITIONS = {
+    (1, 0),  # Open E4
+    (2, 0),  # Open B3
+    (3, 0),  # Open G3
+    (4, 0),  # Open D3
+    (5, 0),  # Open A2
+    (2, 5),  # B string fret 5 = E4
+    (3, 4),  # G string fret 4 = B3
+    (4, 5),  # D string fret 5 = G3
+    (5, 5),  # A string fret 5 = D3
+    (6, 5),  # E string fret 5 = A2
+}
+
+
+def count_ambiguous_samples(rows: List[dict]) -> int:
+    """Count how many samples are from ambiguous positions."""
+    count = 0
+    for row in rows:
+        try:
+            string = int(row.get("string", 0))
+            fret = int(row.get("fret", 0))
+            if (string, fret) in AMBIGUOUS_POSITIONS:
+                count += 1
+        except (ValueError, TypeError):
+            pass
+    return count
+
+
 # -----------------------------
 # Device selection
 # -----------------------------
@@ -85,14 +131,51 @@ def load_mix_csv(csv_path: Path) -> Tuple[List[dict], List[dict]]:
 # Dataset
 # -----------------------------
 
-def _parse_string_label(v: str) -> int:
+def _detect_string_base(rows: List[dict]) -> int:
     """
-    Normalize 'string' field to 1..6.
+    Detect whether the dataset uses 0-based (0..5) or 1-based (1..6) string labels.
+
+    Returns:
+      0 if labels are 0..5
+      1 if labels are 1..6
+
+    Raises if values do not match either scheme.
+    """
+    vals: List[int] = []
+    for r in rows:
+        v = r.get("string", None)
+        if v is None:
+            continue
+        s = str(v).strip().lower()
+        if s.startswith("s") and s[1:].isdigit():
+            vals.append(int(s[1:]))
+        elif s.isdigit():
+            vals.append(int(s))
+        else:
+            raise ValueError(f"unrecognized string label: {v}")
+
+    if not vals:
+        raise ValueError("no string labels found to detect base")
+
+    mn, mx = min(vals), max(vals)
+    if mn == 0 and mx == 5:
+        return 0
+    if mn == 1 and mx == 6:
+        return 1
+
+    raise ValueError(
+        f"inconsistent string labels (min={mn}, max={mx}); expected 0..5 or 1..6"
+    )
+
+
+def _parse_string_label(v: str, base: int) -> int:
+    """
+    Normalize 'string' field to 1..6 using detected base.
 
     Accepts:
-      - "1".."6"
-      - "0".."5" (auto-shift to 1..6)
-      - "s1".."s6"
+      - "1".."6" (base=1)
+      - "0".."5" (base=0; shifts to 1..6)
+      - "s1".."s6" or "s0".."s5" depending on base
     """
     if v is None:
         raise ValueError("missing string label")
@@ -105,9 +188,8 @@ def _parse_string_label(v: str) -> int:
     else:
         raise ValueError(f"unrecognized string label: {v}")
 
-    # allow 0-based
-    if 0 <= n <= 5:
-        n = n + 1
+    if base == 0:
+        n = n + 1  # 0..5 -> 1..6
 
     if not (1 <= n <= 6):
         raise ValueError(f"string out of range after normalize: {n}")
@@ -141,6 +223,8 @@ class StringDatasetFromMix(Dataset):
         super().__init__()
 
         self.rows = rows
+        self.base = _detect_string_base(rows)
+
         self.sample_rate = sample_rate
         self.attack_duration = float(attack_duration)
         self.attack_samples = int(round(sample_rate * attack_duration))
@@ -218,7 +302,7 @@ class StringDatasetFromMix(Dataset):
         abs_path = row["abs_path"]
 
         try:
-            s = _parse_string_label(row.get("string", ""))
+            s = _parse_string_label(row.get("string", ""), base=self.base)
         except Exception as e:
             raise RuntimeError(f"Bad string label for row index {idx}: {e}")
 
@@ -455,6 +539,10 @@ def write_summary(
     ds: StringDatasetFromMix,
     cmd_argv: List[str],
     figures: List[str],
+    label_counts_train: np.ndarray,
+    label_counts_val: np.ndarray,
+    train_ambiguous: int = 0,
+    val_ambiguous: int = 0,
 ) -> None:
     summary_path = run_dir / "summary.txt"
     with summary_path.open("w") as f:
@@ -495,7 +583,8 @@ def write_summary(
         f.write(f"  f_min: {ds.f_min}\n")
         f.write(f"  f_max: {ds.f_max}\n")
         f.write(f"  num_frames: {ds.num_frames}\n")
-        f.write(f"  augment: {int(ds.augment)}\n\n")
+        f.write(f"  augment: {int(ds.augment)}\n")
+        f.write(f"  detected_label_base: {ds.base}  # 0=>0..5, 1=>1..6 in CSV\n\n")
 
         f.write("Model params:\n")
         f.write(f"  model_class: {model.__class__.__name__}\n")
@@ -516,7 +605,13 @@ def write_summary(
         f.write("Data:\n")
         f.write(f"  Train samples: {train_len}\n")
         f.write(f"  Val samples:   {val_len}\n")
-        f.write("  Num classes (strings): 6\n\n")
+        f.write("  Num classes (strings): 6\n")
+        f.write(f"  Train ambiguous samples: {train_ambiguous} ({100*train_ambiguous/train_len:.1f}%)\n")
+        f.write(f"  Val ambiguous samples:   {val_ambiguous} ({100*val_ambiguous/val_len:.1f}%)\n\n")
+
+        f.write("Label counts (after normalization; labels are 0..5):\n")
+        f.write(f"  Train: {label_counts_train.tolist()}\n")
+        f.write(f"  Val:   {label_counts_val.tolist()}\n\n")
 
         f.write("Training history:\n")
         for epoch in range(len(history["train_loss"])):
@@ -546,6 +641,14 @@ def write_summary(
             for fig in figures:
                 f.write(f"  - {fig}\n")
             f.write("\n")
+
+
+def _count_labels(ds: StringDatasetFromMix) -> np.ndarray:
+    counts = np.zeros(6, dtype=np.int64)
+    for i in range(len(ds)):
+        _, y = ds[i]
+        counts[int(y)] += 1
+    return counts
 
 
 # -----------------------------
@@ -594,6 +697,12 @@ def main():
 
     train_rows, val_rows = load_mix_csv(mix_csv)
 
+    # Log ambiguous sample counts
+    train_ambiguous = count_ambiguous_samples(train_rows)
+    val_ambiguous = count_ambiguous_samples(val_rows)
+    print(f"Ambiguous samples: {train_ambiguous} train, {val_ambiguous} val "
+          f"({100*train_ambiguous/len(train_rows):.1f}% / {100*val_ambiguous/len(val_rows):.1f}%)")
+
     train_ds = StringDatasetFromMix(
         train_rows,
         hop_length=args.hop_length,
@@ -608,6 +717,12 @@ def main():
         num_frames=args.num_frames,
         augment=False,
     )
+
+    # Sanity: label distributions (post-normalization)
+    label_counts_train = _count_labels(train_ds)
+    label_counts_val = _count_labels(val_ds)
+    print("Train label counts (0..5):", label_counts_train.tolist())
+    print("Val label counts (0..5):  ", label_counts_val.tolist())
 
     train_loader = DataLoader(
         train_ds,
@@ -698,6 +813,11 @@ def main():
                     "patience": args.lr_patience,
                     "step_metric": "val_acc",
                 },
+                "label_schema": {
+                    "csv_base_detected": int(train_ds.base),  # 0 => CSV 0..5, 1 => CSV 1..6
+                    "train_label_range": "0..5",
+                    "val_label_range": "0..5",
+                },
             }
             torch.save(checkpoint, checkpoint_path)
             print(f"Saved new best checkpoint to {checkpoint_path}")
@@ -739,6 +859,10 @@ def main():
         ds=train_ds,
         cmd_argv=[str(Path(__file__).resolve())] + sys.argv[1:],
         figures=figures,
+        label_counts_train=label_counts_train,
+        label_counts_val=label_counts_val,
+        train_ambiguous=train_ambiguous,
+        val_ambiguous=val_ambiguous,
     )
 
     print("Artifacts written to:", run_dir)

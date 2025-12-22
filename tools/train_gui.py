@@ -1,23 +1,50 @@
 #!/usr/bin/env python3
+"""
+train_gui.py - Unified Training Mix Builder and Model Trainer
+
+A GUI application for building training mixes and training note/string models.
+
+Features:
+- Auto-scans datasets from fretListener/data
+- Mode switching between Note and String classification
+- Uses unified build_training_mix.py with --mode flag
+- Subprocess-based training with live log output
+- Ambiguous position upweighting for string mode
+"""
 
 import sys
 import threading
 import queue
 import subprocess
-from pathlib import Path
-from typing import Optional, List, Dict
 import os
+from pathlib import Path
+from typing import Optional, Dict
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+# Add parent directory for common imports
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from common.guitar import AMBIGUOUS_POSITIONS
+
+
+# ============================
+# COLORS
+# ============================
 
 ACCENT_BLUE = "#4fc3f7"
+ACCENT_GREEN = "#81c784"
 BG_DARK = "#1e1e1e"
 BG_MID = "#2d2d2d"
 FG = "#e0e0e0"
 FG_DIM = "#888888"
 
+
+# ============================
+# UTILITIES
+# ============================
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
@@ -28,15 +55,20 @@ def _python_exec() -> str:
 
 
 def _is_dataset_root(p: Path) -> bool:
+    """Check if a path is a valid dataset directory."""
     if not p.is_dir():
         return False
     meta_csv = p / "meta" / "metadata.csv"
-    if not meta_csv.is_file():
-        return False
-    return True
+    return meta_csv.is_file()
 
+
+# ============================
+# TOOLTIP
+# ============================
 
 class ToolTip:
+    """Hover tooltip widget."""
+    
     def __init__(self, widget: tk.Widget, text: str) -> None:
         self.widget = widget
         self.text = text
@@ -100,7 +132,6 @@ class ToolTip:
             wraplength=420,
         )
         label.pack()
-
         self._position()
 
     def _position(self) -> None:
@@ -122,11 +153,17 @@ class ToolTip:
             self._tw = None
 
 
+# ============================
+# MAIN GUI
+# ============================
+
 class TrainGUI(tk.Tk):
+    """Main training GUI application."""
+
     def __init__(self) -> None:
         super().__init__()
         self.title("fretListener - Training Mix + Train")
-        self.minsize(1100, 700)
+        self.minsize(1100, 750)
         self.configure(bg=BG_DARK)
 
         self._log_q: "queue.Queue[str]" = queue.Queue()
@@ -134,12 +171,14 @@ class TrainGUI(tk.Tk):
         self._stop_requested = False
 
         self._dataset_vars: Dict[Path, tk.BooleanVar] = {}
+        self._mode_var = tk.StringVar(value="note")
 
         self._build_ui()
         self._scan_and_populate_datasets()
         self.after(50, self._drain_log_queue)
 
     def _build_ui(self) -> None:
+        """Build the user interface."""
         style = ttk.Style()
         try:
             style.theme_use("clam")
@@ -151,9 +190,10 @@ class TrainGUI(tk.Tk):
         style.configure("TLabel", background=BG_DARK, foreground=FG)
         style.configure("TLabelframe", background=BG_DARK, foreground=FG)
         style.configure("TLabelframe.Label", background=BG_DARK, foreground=ACCENT_BLUE)
-
         style.configure("TEntry", fieldbackground=BG_MID, foreground=FG)
         style.configure("TSpinbox", fieldbackground=BG_MID, foreground=FG)
+        style.configure("TRadiobutton", background=BG_DARK, foreground=FG)
+        style.configure("TCheckbutton", background=BG_DARK, foreground=FG)
 
         style.map(
             "TCombobox",
@@ -164,13 +204,45 @@ class TrainGUI(tk.Tk):
         )
         style.configure("TCombobox", fieldbackground=BG_MID, foreground=FG, background=BG_MID)
 
-        root = ttk.Frame(self, padding=12)
-        root.pack(fill="both", expand=True)
+        root_frame = ttk.Frame(self, padding=12)
+        root_frame.pack(fill="both", expand=True)
 
-        top = ttk.Frame(root)
+        # === Mode selector ===
+        mode_frame = ttk.Frame(root_frame)
+        mode_frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(mode_frame, text="Training Mode:", font=("Arial", 11, "bold")).pack(side="left")
+
+        self.note_radio = ttk.Radiobutton(
+            mode_frame,
+            text="Note Classification",
+            variable=self._mode_var,
+            value="note",
+            command=self._on_mode_change,
+        )
+        self.note_radio.pack(side="left", padx=(16, 0))
+
+        self.string_radio = ttk.Radiobutton(
+            mode_frame,
+            text="String Classification",
+            variable=self._mode_var,
+            value="string",
+            command=self._on_mode_change,
+        )
+        self.string_radio.pack(side="left", padx=(16, 0))
+
+        ToolTip(self.note_radio, "Train a model to classify fret position.\nUses build_training_mix.py --mode note")
+        ToolTip(self.string_radio, "Train a model to classify which string (1-6).\nUses build_training_mix.py --mode string")
+
+        self.mode_indicator_var = tk.StringVar(value="")
+        self.mode_indicator = ttk.Label(mode_frame, textvariable=self.mode_indicator_var, font=("Arial", 10, "bold"))
+        self.mode_indicator.pack(side="right", padx=(0, 10))
+
+        # === Top row: Datasets + Mix Params ===
+        top = ttk.Frame(root_frame)
         top.pack(fill="x", pady=(0, 10))
 
-        # --- Datasets (auto-scanned) ---
+        # --- Datasets ---
         ds_frame = ttk.LabelFrame(top, text="Datasets (auto-scanned from fretListener/data)", padding=10)
         ds_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
@@ -184,14 +256,10 @@ class TrainGUI(tk.Tk):
         self.select_none_btn = ttk.Button(ds_toolbar, text="Select None", command=self._select_none_datasets)
         self.select_none_btn.pack(side="left", padx=(8, 0))
 
-        ToolTip(self.rescan_btn, "Rescan fretListener/data and repopulate the dataset list.")
-        ToolTip(self.select_all_btn, "Check every dataset in the list.")
-        ToolTip(self.select_none_btn, "Uncheck every dataset in the list.")
-
         self.ds_count_var = tk.StringVar(value="")
         ttk.Label(ds_toolbar, textvariable=self.ds_count_var, foreground=FG_DIM).pack(side="right")
 
-        self.ds_canvas = tk.Canvas(ds_frame, bg=BG_MID, highlightthickness=0)
+        self.ds_canvas = tk.Canvas(ds_frame, bg=BG_MID, highlightthickness=0, height=150)
         self.ds_canvas.pack(side="left", fill="both", expand=True)
 
         ds_scroll = ttk.Scrollbar(ds_frame, orient="vertical", command=self.ds_canvas.yview)
@@ -211,172 +279,54 @@ class TrainGUI(tk.Tk):
         self.ds_canvas.bind("<Configure>", _on_canvas_configure)
 
         # --- Mix parameters ---
-        mix_frame = ttk.LabelFrame(top, text="Training Mix Parameters", padding=10)
-        mix_frame.pack(side="left", fill="y")
+        self.mix_frame = ttk.LabelFrame(top, text="Training Mix Parameters", padding=10)
+        self.mix_frame.pack(side="left", fill="y")
 
-        self.max_per_class_var = tk.StringVar(value="")  # blank => None
+        # Common variables
         self.train_ratio_var = tk.StringVar(value="0.8")
         self.mix_seed_var = tk.StringVar(value="42")
-        self.mix_output_var = tk.StringVar(value=str((_project_root() / "recipes" / "training_mix.csv")))
 
-        row = 0
-        ttk.Label(mix_frame, text="Max per class (pos) [blank = no cap]").grid(row=row, column=0, sticky="w")
-        self.max_per_class_entry = ttk.Entry(mix_frame, textvariable=self.max_per_class_var, width=24)
-        self.max_per_class_entry.grid(row=row, column=1, sticky="w", padx=(8, 0))
-        ToolTip(
-            self.max_per_class_entry,
-            "Optional cap per position class (pos).\n"
-            "Blank = no cap (use all samples per class).\n"
-            "Use to prevent large datasets dominating training."
-        )
-        row += 1
+        # Note mode variables
+        self.max_per_class_var = tk.StringVar(value="")
+        self.mix_output_var = tk.StringVar(value=str(_project_root() / "recipes" / "note_training_mix.csv"))
 
-        ttk.Label(mix_frame, text="Train ratio").grid(row=row, column=0, sticky="w", pady=(8, 0))
-        self.train_ratio_entry = ttk.Entry(mix_frame, textvariable=self.train_ratio_var, width=24)
-        self.train_ratio_entry.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
-        ToolTip(
-            self.train_ratio_entry,
-            "Train/val split ratio per class.\n"
-            "0.8 = 80% train, 20% val.\n"
-            "If a class has only 1 sample, it is forced into train."
-        )
-        row += 1
+        # String mode variables
+        self.max_per_string_var = tk.StringVar(value="")
+        self.stratify_fret_var = tk.BooleanVar(value=True)
+        self.ambiguous_multiplier_var = tk.StringVar(value="2.0")
+        self.string_mix_output_var = tk.StringVar(value=str(_project_root() / "recipes" / "string_training_mix.csv"))
 
-        ttk.Label(mix_frame, text="Seed").grid(row=row, column=0, sticky="w", pady=(8, 0))
-        self.mix_seed_entry = ttk.Entry(mix_frame, textvariable=self.mix_seed_var, width=24)
-        self.mix_seed_entry.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
-        ToolTip(
-            self.mix_seed_entry,
-            "Random seed used when shuffling samples and creating train/val splits.\n"
-            "Same seed = repeatable splits."
-        )
-        row += 1
+        self._build_note_mix_params()
+        self._build_string_mix_params()
 
-        ttk.Label(mix_frame, text="Output CSV").grid(row=row, column=0, sticky="w", pady=(8, 0))
-        out_row = ttk.Frame(mix_frame)
-        out_row.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
-        self.mix_output_entry = ttk.Entry(out_row, textvariable=self.mix_output_var, width=40)
-        self.mix_output_entry.pack(side="left")
-        self.mix_output_browse_btn = ttk.Button(out_row, text="Browse…", command=self._browse_mix_output)
-        self.mix_output_browse_btn.pack(side="left", padx=(8, 0))
-        ToolTip(
-            self.mix_output_entry,
-            "Where the training mix CSV will be written.\n"
-            "This CSV is passed to the training script via --mix-csv."
-        )
-        ToolTip(self.mix_output_browse_btn, "Choose an output location for the training mix CSV.")
-        row += 1
+        # === Training parameters ===
+        self.train_frame = ttk.LabelFrame(root_frame, text="Training Parameters", padding=10)
+        self.train_frame.pack(fill="x", pady=(0, 10))
 
-        # --- Training parameters ---
-        train_frame = ttk.LabelFrame(root, text="Training Parameters (src/train_note_model.py)", padding=10)
-        train_frame.pack(fill="x", pady=(0, 10))
-
+        # Shared training variables
         self.batch_size_var = tk.StringVar(value="64")
         self.epochs_var = tk.StringVar(value="30")
         self.lr_var = tk.StringVar(value="1e-3")
         self.num_workers_var = tk.StringVar(value="0")
         self.train_seed_var = tk.StringVar(value="42")
-        self.ckpt_name_var = tk.StringVar(value="note_cnn_best.pt")
-        self.train_script_var = tk.StringVar(value=str((_project_root() / "src" / "train_note_model.py")))
 
+        # Note-specific
+        self.note_ckpt_name_var = tk.StringVar(value="note_cnn_best.pt")
+        self.note_train_script_var = tk.StringVar(value=str(_project_root() / "src" / "train_note_model.py"))
+
+        # String-specific
+        self.string_ckpt_name_var = tk.StringVar(value="string_cnn_best.pt")
+        self.string_train_script_var = tk.StringVar(value=str(_project_root() / "src" / "train_string_model.py"))
+
+        # Spectrogram params
         self.n_mels_var = tk.StringVar(value="64")
         self.hop_length_var = tk.StringVar(value="128")
         self.num_frames_var = tk.StringVar(value="96")
 
-        grid = ttk.Frame(train_frame)
-        grid.pack(fill="x")
+        self._build_training_params()
 
-        def add_field(r: int, c: int, label: str, var: tk.StringVar, width: int = 12) -> tk.Widget:
-            ttk.Label(grid, text=label).grid(row=r, column=c, sticky="w", padx=(0, 8), pady=3)
-            e = ttk.Entry(grid, textvariable=var, width=width)
-            e.grid(row=r, column=c + 1, sticky="w", padx=(0, 16), pady=3)
-            return e
-
-        self.batch_size_entry = add_field(0, 0, "Batch size", self.batch_size_var)
-        self.epochs_entry = add_field(0, 2, "Epochs", self.epochs_var)
-        self.lr_entry = add_field(0, 4, "LR", self.lr_var)
-        self.num_workers_entry = add_field(0, 6, "Num workers", self.num_workers_var)
-
-        ToolTip(
-            self.batch_size_entry,
-            "Batch size: samples per optimization step.\n"
-            "Higher = smoother gradients, more memory.\n"
-            "Lower = noisier gradients, may generalize better."
-        )
-        ToolTip(
-            self.epochs_entry,
-            "Epochs: full passes over the training set.\n"
-            "More epochs = longer training.\n"
-            "LR scheduler may reduce LR during training."
-        )
-        ToolTip(
-            self.lr_entry,
-            "Learning rate: step size for weight updates.\n"
-            "Default 1e-3 is a common starting point.\n"
-            "Lower = more stable, slower.\n"
-            "Higher = faster, may diverge."
-        )
-        ToolTip(
-            self.num_workers_entry,
-            "DataLoader workers for loading data.\n"
-            "0 = run data loading in the main training process (most compatible on macOS).\n"
-            "Higher can improve throughput but may add overhead."
-        )
-
-        self.train_seed_entry = add_field(1, 0, "Seed", self.train_seed_var)
-        self.ckpt_name_entry = add_field(1, 2, "Checkpoint name", self.ckpt_name_var, width=20)
-
-        ToolTip(
-            self.train_seed_entry,
-            "Training seed: affects shuffling order and initialization (as used by the training script).\n"
-            "Set for repeatability."
-        )
-        ToolTip(
-            self.ckpt_name_entry,
-            "Filename of the best checkpoint saved inside the run artifacts directory.\n"
-            "This is passed to the training script as --checkpoint-name."
-        )
-
-        self.n_mels_entry = add_field(2, 0, "n_mels", self.n_mels_var)
-        self.hop_length_entry = add_field(2, 2, "hop_length", self.hop_length_var)
-        self.num_frames_entry = add_field(2, 4, "num_frames", self.num_frames_var)
-
-        ToolTip(
-            self.n_mels_entry,
-            "Mel bins in the spectrogram.\n"
-            "Higher can improve pitch resolution but increases compute.\n"
-            "Common: 48, 64, 80."
-        )
-        ToolTip(
-            self.hop_length_entry,
-            "Hop length (samples) between spectrogram frames.\n"
-            "Lower = more time resolution, more frames/compute.\n"
-            "Common: 128, 256."
-        )
-        ToolTip(
-            self.num_frames_entry,
-            "Fixed number of time frames used as model input.\n"
-            "Spectrogram is cropped/padded to this length.\n"
-            "Must match ONNX export shape."
-        )
-
-        ttk.Label(grid, text="Train script").grid(row=1, column=4, sticky="w", padx=(0, 8), pady=3)
-        script_row = ttk.Frame(grid)
-        script_row.grid(row=1, column=5, columnspan=3, sticky="w", pady=3)
-        self.train_script_entry = ttk.Entry(script_row, textvariable=self.train_script_var, width=48)
-        self.train_script_entry.pack(side="left")
-        self.train_script_browse_btn = ttk.Button(script_row, text="Browse…", command=self._browse_train_script)
-        self.train_script_browse_btn.pack(side="left", padx=(8, 0))
-
-        ToolTip(
-            self.train_script_entry,
-            "Python training entrypoint.\n"
-            "Must accept the flags passed by this GUI (e.g., --mix-csv, --batch-size, --epochs, --lr, ...)."
-        )
-        ToolTip(self.train_script_browse_btn, "Choose the training script to run (typically src/train_note_model.py).")
-
-        # --- Actions (tk.Button for macOS-visible text) ---
-        actions = ttk.Frame(root)
+        # === Actions ===
+        actions = ttk.Frame(root_frame)
         actions.pack(fill="x", pady=(0, 10))
 
         self.build_mix_btn = tk.Button(
@@ -397,9 +347,9 @@ class TrainGUI(tk.Tk):
             actions,
             text="RUN TRAINING",
             command=self._start_training,
-            bg=ACCENT_BLUE,
+            bg=ACCENT_GREEN,
             fg="#000000",
-            activebackground=ACCENT_BLUE,
+            activebackground=ACCENT_GREEN,
             activeforeground="#000000",
             relief="flat",
             padx=14,
@@ -409,12 +359,12 @@ class TrainGUI(tk.Tk):
 
         self.stop_btn = tk.Button(
             actions,
-            text="STOP (best-effort)",
+            text="STOP",
             command=self._request_stop,
-            bg=BG_MID,
-            fg=FG,
-            activebackground=BG_MID,
-            activeforeground=FG,
+            bg="#ef4444",
+            fg="#ffffff",
+            activebackground="#ef4444",
+            activeforeground="#ffffff",
             relief="flat",
             padx=14,
             pady=10,
@@ -422,26 +372,12 @@ class TrainGUI(tk.Tk):
         )
         self.stop_btn.pack(side="left", padx=(10, 0))
 
-        ToolTip(
-            self.build_mix_btn,
-            "Build the training mix CSV using the selected datasets and mix parameters.\n"
-            "This calls tools/build_training_mix.py via import and runs in a worker thread."
-        )
-        ToolTip(
-            self.run_train_btn,
-            "Run the training script using the current training parameters.\n"
-            "Uses the mix CSV path from Output CSV as --mix-csv.\n"
-            "Streams stdout/stderr into the log."
-        )
-        ToolTip(
-            self.stop_btn,
-            "Request stop.\n"
-            "Sends a terminate() to the training subprocess (best-effort).\n"
-            "May not immediately stop if the process is in an uninterruptible state."
-        )
+        ToolTip(self.build_mix_btn, "Build training mix CSV using unified build_training_mix.py")
+        ToolTip(self.run_train_btn, "Run training with the appropriate train script")
+        ToolTip(self.stop_btn, "Request stop (terminates subprocess)")
 
-        # --- Log ---
-        log_frame = ttk.LabelFrame(root, text="Log", padding=10)
+        # === Log ===
+        log_frame = ttk.LabelFrame(root_frame, text="Log", padding=10)
         log_frame.pack(fill="both", expand=True)
 
         self.log_text = tk.Text(
@@ -460,50 +396,192 @@ class TrainGUI(tk.Tk):
         log_scroll.pack(side="left", fill="y")
         self.log_text.configure(yscrollcommand=log_scroll.set)
 
-    # ------------------------
-    # Dataset scanning + UI
-    # ------------------------
+        # Initial mode setup
+        self._on_mode_change()
+
+    def _build_note_mix_params(self) -> None:
+        """Build note-mode mix parameter widgets."""
+        self.note_mix_frame = ttk.Frame(self.mix_frame)
+
+        row = 0
+        ttk.Label(self.note_mix_frame, text="Max per class [blank = no cap]").grid(row=row, column=0, sticky="w")
+        e = ttk.Entry(self.note_mix_frame, textvariable=self.max_per_class_var, width=24)
+        e.grid(row=row, column=1, sticky="w", padx=(8, 0))
+        ToolTip(e, "Optional cap per position class.\nBlank = use all samples.")
+        row += 1
+
+        ttk.Label(self.note_mix_frame, text="Train ratio").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        e = ttk.Entry(self.note_mix_frame, textvariable=self.train_ratio_var, width=24)
+        e.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ToolTip(e, "Train/val split ratio. 0.8 = 80% train, 20% val.")
+        row += 1
+
+        ttk.Label(self.note_mix_frame, text="Seed").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        e = ttk.Entry(self.note_mix_frame, textvariable=self.mix_seed_var, width=24)
+        e.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ToolTip(e, "Random seed for reproducibility.")
+        row += 1
+
+        ttk.Label(self.note_mix_frame, text="Output CSV").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        out_row = ttk.Frame(self.note_mix_frame)
+        out_row.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(out_row, textvariable=self.mix_output_var, width=40).pack(side="left")
+        ttk.Button(out_row, text="Browse…", command=self._browse_note_mix_output).pack(side="left", padx=(8, 0))
+
+    def _build_string_mix_params(self) -> None:
+        """Build string-mode mix parameter widgets."""
+        self.string_mix_frame = ttk.Frame(self.mix_frame)
+
+        row = 0
+        ttk.Label(self.string_mix_frame, text="Max per string [blank = no cap]").grid(row=row, column=0, sticky="w")
+        e = ttk.Entry(self.string_mix_frame, textvariable=self.max_per_string_var, width=24)
+        e.grid(row=row, column=1, sticky="w", padx=(8, 0))
+        ToolTip(e, "Optional cap per string.\nBlank = use all samples.")
+        row += 1
+
+        ttk.Label(self.string_mix_frame, text="Train ratio").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        e = ttk.Entry(self.string_mix_frame, textvariable=self.train_ratio_var, width=24)
+        e.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        row += 1
+
+        ttk.Label(self.string_mix_frame, text="Seed").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        e = ttk.Entry(self.string_mix_frame, textvariable=self.mix_seed_var, width=24)
+        e.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        row += 1
+
+        cb = ttk.Checkbutton(
+            self.string_mix_frame,
+            text="Stratify by fret within each string",
+            variable=self.stratify_fret_var,
+        )
+        cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ToolTip(cb, "Balance samples across frets within each string.")
+        row += 1
+
+        ttk.Label(self.string_mix_frame, text="Ambiguous multiplier").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        e = ttk.Entry(self.string_mix_frame, textvariable=self.ambiguous_multiplier_var, width=24)
+        e.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ToolTip(
+            e,
+            "Oversample ambiguous positions.\n"
+            "1.0 = no oversampling\n"
+            "2.0 = 2x samples (recommended)\n\n"
+            "Ambiguous pairs:\n"
+            "  • Open E4 ↔ B string fret 5\n"
+            "  • Open B3 ↔ G string fret 4\n"
+            "  • Open G3 ↔ D string fret 5\n"
+            "  • Open D3 ↔ A string fret 5\n"
+            "  • Open A2 ↔ E string fret 5"
+        )
+        row += 1
+
+        ttk.Label(self.string_mix_frame, text="Output CSV").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        out_row = ttk.Frame(self.string_mix_frame)
+        out_row.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(out_row, textvariable=self.string_mix_output_var, width=40).pack(side="left")
+        ttk.Button(out_row, text="Browse…", command=self._browse_string_mix_output).pack(side="left", padx=(8, 0))
+
+    def _build_training_params(self) -> None:
+        """Build training parameter widgets."""
+        grid = ttk.Frame(self.train_frame)
+        grid.pack(fill="x")
+
+        def add_field(r: int, c: int, label: str, var: tk.StringVar, width: int = 12) -> tk.Widget:
+            ttk.Label(grid, text=label).grid(row=r, column=c, sticky="w", padx=(0, 8), pady=3)
+            e = ttk.Entry(grid, textvariable=var, width=width)
+            e.grid(row=r, column=c + 1, sticky="w", padx=(0, 16), pady=3)
+            return e
+
+        add_field(0, 0, "Batch size", self.batch_size_var)
+        add_field(0, 2, "Epochs", self.epochs_var)
+        add_field(0, 4, "LR", self.lr_var)
+        add_field(0, 6, "Num workers", self.num_workers_var)
+
+        add_field(1, 0, "Seed", self.train_seed_var)
+        add_field(1, 2, "n_mels", self.n_mels_var)
+        add_field(1, 4, "hop_length", self.hop_length_var)
+        add_field(1, 6, "num_frames", self.num_frames_var)
+
+        # Checkpoint name (mode-dependent)
+        ttk.Label(grid, text="Checkpoint").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        self.ckpt_frame = ttk.Frame(grid)
+        self.ckpt_frame.grid(row=2, column=1, columnspan=3, sticky="w", padx=(0, 16), pady=3)
+
+        self.note_ckpt_entry = ttk.Entry(self.ckpt_frame, textvariable=self.note_ckpt_name_var, width=24)
+        self.string_ckpt_entry = ttk.Entry(self.ckpt_frame, textvariable=self.string_ckpt_name_var, width=24)
+
+        # Train script (mode-dependent)
+        ttk.Label(grid, text="Train script").grid(row=2, column=4, sticky="w", padx=(0, 8), pady=3)
+        self.script_frame = ttk.Frame(grid)
+        self.script_frame.grid(row=2, column=5, columnspan=3, sticky="w", pady=3)
+
+        self.note_script_row = ttk.Frame(self.script_frame)
+        self.note_train_script_entry = ttk.Entry(self.note_script_row, textvariable=self.note_train_script_var, width=40)
+        self.note_train_script_entry.pack(side="left")
+        ttk.Button(self.note_script_row, text="Browse…", command=self._browse_note_train_script).pack(side="left", padx=(8, 0))
+
+        self.string_script_row = ttk.Frame(self.script_frame)
+        self.string_train_script_entry = ttk.Entry(self.string_script_row, textvariable=self.string_train_script_var, width=40)
+        self.string_train_script_entry.pack(side="left")
+        ttk.Button(self.string_script_row, text="Browse…", command=self._browse_string_train_script).pack(side="left", padx=(8, 0))
+
+    def _on_mode_change(self) -> None:
+        """Handle mode switch."""
+        mode = self._mode_var.get()
+
+        if mode == "note":
+            self.string_mix_frame.pack_forget()
+            self.note_mix_frame.pack(fill="both", expand=True)
+            self.mode_indicator_var.set("MODE: Note Classification")
+            self.mode_indicator.configure(foreground=ACCENT_BLUE)
+            self.train_frame.configure(text="Training Parameters (train_note_model.py)")
+
+            self.string_ckpt_entry.pack_forget()
+            self.note_ckpt_entry.pack(side="left")
+
+            self.string_script_row.pack_forget()
+            self.note_script_row.pack(side="left")
+        else:
+            self.note_mix_frame.pack_forget()
+            self.string_mix_frame.pack(fill="both", expand=True)
+            self.mode_indicator_var.set("MODE: String Classification")
+            self.mode_indicator.configure(foreground=ACCENT_GREEN)
+            self.train_frame.configure(text="Training Parameters (train_string_model.py)")
+
+            self.note_ckpt_entry.pack_forget()
+            self.string_ckpt_entry.pack(side="left")
+
+            self.note_script_row.pack_forget()
+            self.string_script_row.pack(side="left")
+
+    # === Dataset scanning ===
 
     def _scan_and_populate_datasets(self) -> None:
-        data_root = _project_root() / "data"
-        if not data_root.exists():
-            self._log(f"Warning: data directory not found: {data_root}")
+        """Scan data directory and populate dataset list."""
+        data_dir = _project_root() / "data"
+        
+        # Clear existing
+        for widget in self.ds_inner.winfo_children():
+            widget.destroy()
+        self._dataset_vars.clear()
+
+        if not data_dir.is_dir():
+            self.ds_count_var.set("No data/ directory found")
             return
 
-        datasets = []
-        for p in sorted(data_root.iterdir(), key=lambda x: x.name):
-            if _is_dataset_root(p):
-                datasets.append(p)
+        datasets = sorted([p for p in data_dir.iterdir() if _is_dataset_root(p)])
 
-        for child in list(self.ds_inner.winfo_children()):
-            child.destroy()
+        if not datasets:
+            self.ds_count_var.set("No datasets found")
+            return
 
-        existing = dict(self._dataset_vars)
-        self._dataset_vars = {}
-
-        for ds in datasets:
-            prev = existing.get(ds)
-            var = prev if prev is not None else tk.BooleanVar(value=False)
-            self._dataset_vars[ds] = var
-
-            row = ttk.Frame(self.ds_inner)
-            row.pack(fill="x", pady=2)
-
-            cb = ttk.Checkbutton(row, variable=var)
-            cb.pack(side="left")
-
-            name = ds.name
-            ttk.Label(row, text=name, foreground=FG).pack(side="left", padx=(6, 0))
-
-            ttk.Label(row, text=str(ds), foreground=FG_DIM).pack(side="left", padx=(10, 0))
+        for p in datasets:
+            var = tk.BooleanVar(value=True)
+            self._dataset_vars[p] = var
+            cb = ttk.Checkbutton(self.ds_inner, text=p.name, variable=var)
+            cb.pack(anchor="w", pady=1)
 
         self.ds_count_var.set(f"{len(datasets)} dataset(s) found")
-
-        # Keep scroll position sane
-        try:
-            self.ds_canvas.yview_moveto(0.0)
-        except Exception:
-            pass
 
     def _select_all_datasets(self) -> None:
         for var in self._dataset_vars.values():
@@ -513,44 +591,50 @@ class TrainGUI(tk.Tk):
         for var in self._dataset_vars.values():
             var.set(False)
 
-    def _selected_dataset_paths(self) -> List[Path]:
-        out: List[Path] = []
-        for p, var in self._dataset_vars.items():
-            try:
-                if bool(var.get()):
-                    out.append(p.resolve())
-            except Exception:
-                pass
-        return out
+    def _selected_dataset_paths(self) -> list:
+        return [p for p, var in self._dataset_vars.items() if var.get()]
 
-    # ------------------------
-    # Browsers
-    # ------------------------
+    # === Browse dialogs ===
 
-    def _browse_mix_output(self) -> None:
+    def _browse_note_mix_output(self) -> None:
         p = filedialog.asksaveasfilename(
-            title="Select output CSV path",
+            title="Save note training mix CSV",
             defaultextension=".csv",
-            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
-            initialfile="training_mix.csv",
+            filetypes=[("CSV", "*.csv")],
+            initialdir=str(_project_root() / "recipes"),
         )
-        if not p:
-            return
-        self.mix_output_var.set(str(Path(p).expanduser().resolve()))
+        if p:
+            self.mix_output_var.set(str(Path(p).expanduser().resolve()))
 
-    def _browse_train_script(self) -> None:
+    def _browse_string_mix_output(self) -> None:
+        p = filedialog.asksaveasfilename(
+            title="Save string training mix CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")],
+            initialdir=str(_project_root() / "recipes"),
+        )
+        if p:
+            self.string_mix_output_var.set(str(Path(p).expanduser().resolve()))
+
+    def _browse_note_train_script(self) -> None:
         p = filedialog.askopenfilename(
-            title="Select train script",
-            filetypes=[("Python", "*.py"), ("All files", "*.*")],
+            title="Select note training script",
+            filetypes=[("Python", "*.py")],
             initialdir=str(_project_root() / "src"),
         )
-        if not p:
-            return
-        self.train_script_var.set(str(Path(p).expanduser().resolve()))
+        if p:
+            self.note_train_script_var.set(str(Path(p).expanduser().resolve()))
 
-    # ------------------------
-    # Logging / worker control
-    # ------------------------
+    def _browse_string_train_script(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Select string training script",
+            filetypes=[("Python", "*.py")],
+            initialdir=str(_project_root() / "src"),
+        )
+        if p:
+            self.string_train_script_var.set(str(Path(p).expanduser().resolve()))
+
+    # === Logging ===
 
     def _log(self, s: str) -> None:
         self._log_q.put(s)
@@ -577,7 +661,7 @@ class TrainGUI(tk.Tk):
 
     def _request_stop(self) -> None:
         self._stop_requested = True
-        self._log("Stop requested (best-effort).")
+        self._log("Stop requested.")
 
     def _start_worker(self, target) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -589,9 +673,7 @@ class TrainGUI(tk.Tk):
         self._worker = t
         t.start()
 
-    # ------------------------
-    # Mix build
-    # ------------------------
+    # === Build mix ===
 
     def _parse_int_optional(self, s: str) -> Optional[int]:
         s = (s or "").strip()
@@ -603,92 +685,59 @@ class TrainGUI(tk.Tk):
         return float((s or "").strip())
 
     def _start_build_mix(self) -> None:
+        """Build training mix using unified build_training_mix.py."""
+        mode = self._mode_var.get()
+
         def work():
+            proc: Optional[subprocess.Popen] = None
             try:
                 dataset_roots = self._selected_dataset_paths()
                 if not dataset_roots:
                     self._log("Error: no datasets selected.")
                     return
 
-                max_per_class = self._parse_int_optional(self.max_per_class_var.get())
-                train_ratio = self._parse_float(self.train_ratio_var.get())
-                seed = int((self.mix_seed_var.get() or "42").strip())
-                output_csv = Path(self.mix_output_var.get()).expanduser().resolve()
-
-                tools_dir = _project_root() / "tools"
-                sys.path.insert(0, str(tools_dir))
-                try:
-                    import build_training_mix as btm  # type: ignore
-                finally:
-                    try:
-                        sys.path.remove(str(tools_dir))
-                    except Exception:
-                        pass
-
-                self._log("Building training mix...")
-                self._log("Datasets:")
-                for p in dataset_roots:
-                    self._log(f"  - {p}")
-
-                self._log(f"Max per class: {max_per_class if max_per_class is not None else 'no cap'}")
-                self._log(f"Train ratio:   {train_ratio}")
-                self._log(f"Seed:          {seed}")
-                self._log(f"Output:        {output_csv}")
-
-                btm.build_training_mix(
-                    dataset_roots=dataset_roots,
-                    max_per_class=max_per_class,
-                    train_ratio=train_ratio,
-                    output_csv=output_csv,
-                    seed=seed,
-                )
-                self._log("Training mix build complete.")
-            except Exception as e:
-                self._log(f"Error building mix: {e}")
-            finally:
-                self._set_busy(False)
-
-        self._start_worker(work)
-
-    # ------------------------
-    # Training run
-    # ------------------------
-
-    def _start_training(self) -> None:
-        def work():
-            proc: Optional[subprocess.Popen] = None
-            try:
-                mix_csv = Path(self.mix_output_var.get()).expanduser().resolve()
-                if not mix_csv.is_file():
-                    self._log(f"Error: mix CSV not found: {mix_csv}")
-                    return
-
-                train_script = Path(self.train_script_var.get()).expanduser().resolve()
-                if not train_script.is_file():
-                    self._log(f"Error: train script not found: {train_script}")
+                # Build command for unified build_training_mix.py
+                build_script = _project_root() / "tools" / "build_training_mix.py"
+                if not build_script.exists():
+                    self._log(f"Error: build script not found: {build_script}")
                     return
 
                 cmd = [
                     _python_exec(),
                     "-u",
-                    str(train_script),
-                    "--mix-csv", str(mix_csv),
-                    "--batch-size", (self.batch_size_var.get() or "64").strip(),
-                    "--epochs", (self.epochs_var.get() or "30").strip(),
-                    "--lr", (self.lr_var.get() or "1e-3").strip(),
-                    "--num-workers", (self.num_workers_var.get() or "0").strip(),
-                    "--seed", (self.train_seed_var.get() or "42").strip(),
-                    "--checkpoint-name", (self.ckpt_name_var.get() or "note_cnn_best.pt").strip(),
-                    "--n-mels", (self.n_mels_var.get() or "64").strip(),
-                    "--hop-length", (self.hop_length_var.get() or "128").strip(),
-                    "--num-frames", (self.num_frames_var.get() or "96").strip(),
+                    str(build_script),
+                    "--mode", mode,
+                    "--datasets",
+                ] + [str(p) for p in dataset_roots]
+
+                # Add common params
+                cmd += [
+                    "--train-ratio", self.train_ratio_var.get().strip() or "0.8",
+                    "--seed", self.mix_seed_var.get().strip() or "42",
                 ]
 
-                self._log("Starting training...")
+                if mode == "note":
+                    max_per = self._parse_int_optional(self.max_per_class_var.get())
+                    if max_per is not None:
+                        cmd += ["--max-per-class", str(max_per)]
+                    cmd += ["--output", self.mix_output_var.get().strip()]
+                else:
+                    max_per = self._parse_int_optional(self.max_per_string_var.get())
+                    if max_per is not None:
+                        cmd += ["--max-per-string", str(max_per)]
+                    if self.stratify_fret_var.get():
+                        cmd += ["--stratify-by-fret"]
+                    else:
+                        cmd += ["--no-stratify-by-fret"]
+                    cmd += ["--ambiguous-multiplier", self.ambiguous_multiplier_var.get().strip() or "1.0"]
+                    cmd += ["--output", self.string_mix_output_var.get().strip()]
+
+                self._log("=" * 60)
+                self._log(f"Building {mode.upper()} training mix...")
+                self._log("=" * 60)
                 self._log(" ".join(cmd))
 
-                env = dict(**{k: v for k, v in ({}).items()})
-                env.update(dict(os.environ))
+                env = dict(os.environ)
                 env["PYTHONUNBUFFERED"] = "1"
 
                 proc = subprocess.Popen(
@@ -702,15 +751,89 @@ class TrainGUI(tk.Tk):
                     env=env,
                 )
 
-                self._log("Training process started; waiting for first output...")
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if self._stop_requested and proc.poll() is None:
+                        proc.terminate()
+                    self._log(line.rstrip("\n"))
+
+                rc = proc.wait()
+                self._log(f"Build mix finished (exit code {rc}).")
+
+            except Exception as e:
+                self._log(f"Error building mix: {e}")
+            finally:
+                if proc is not None and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                self._set_busy(False)
+
+        self._start_worker(work)
+
+    # === Training ===
+
+    def _start_training(self) -> None:
+        mode = self._mode_var.get()
+        if mode == "note":
+            self._start_note_training()
+        else:
+            self._start_string_training()
+
+    def _start_note_training(self) -> None:
+        def work():
+            proc: Optional[subprocess.Popen] = None
+            try:
+                mix_csv = Path(self.mix_output_var.get()).expanduser().resolve()
+                if not mix_csv.is_file():
+                    self._log(f"Error: mix CSV not found: {mix_csv}")
+                    return
+
+                train_script = Path(self.note_train_script_var.get()).expanduser().resolve()
+                if not train_script.is_file():
+                    self._log(f"Error: train script not found: {train_script}")
+                    return
+
+                cmd = [
+                    _python_exec(),
+                    "-u",
+                    str(train_script),
+                    "--mix-csv", str(mix_csv),
+                    "--batch-size", self.batch_size_var.get().strip() or "64",
+                    "--epochs", self.epochs_var.get().strip() or "30",
+                    "--lr", self.lr_var.get().strip() or "1e-3",
+                    "--num-workers", self.num_workers_var.get().strip() or "0",
+                    "--seed", self.train_seed_var.get().strip() or "42",
+                    "--checkpoint-name", self.note_ckpt_name_var.get().strip() or "note_cnn_best.pt",
+                    "--n-mels", self.n_mels_var.get().strip() or "64",
+                    "--hop-length", self.hop_length_var.get().strip() or "128",
+                    "--num-frames", self.num_frames_var.get().strip() or "96",
+                ]
+
+                self._log("=" * 60)
+                self._log("Starting NOTE training...")
+                self._log("=" * 60)
+                self._log(" ".join(cmd))
+
+                env = dict(os.environ)
+                env["PYTHONUNBUFFERED"] = "1"
+
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(_project_root()),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                    env=env,
+                )
 
                 assert proc.stdout is not None
                 for line in proc.stdout:
                     if self._stop_requested and proc.poll() is None:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
+                        proc.terminate()
                     self._log(line.rstrip("\n"))
 
                 rc = proc.wait()
@@ -719,15 +842,89 @@ class TrainGUI(tk.Tk):
             except Exception as e:
                 self._log(f"Error running training: {e}")
             finally:
-                try:
-                    if proc is not None and proc.poll() is None:
+                if proc is not None and proc.poll() is None:
+                    try:
                         proc.terminate()
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
                 self._set_busy(False)
 
         self._start_worker(work)
 
+    def _start_string_training(self) -> None:
+        def work():
+            proc: Optional[subprocess.Popen] = None
+            try:
+                mix_csv = Path(self.string_mix_output_var.get()).expanduser().resolve()
+                if not mix_csv.is_file():
+                    self._log(f"Error: mix CSV not found: {mix_csv}")
+                    return
+
+                train_script = Path(self.string_train_script_var.get()).expanduser().resolve()
+                if not train_script.is_file():
+                    self._log(f"Error: train script not found: {train_script}")
+                    return
+
+                cmd = [
+                    _python_exec(),
+                    "-u",
+                    str(train_script),
+                    "--mix-csv", str(mix_csv),
+                    "--batch-size", self.batch_size_var.get().strip() or "64",
+                    "--epochs", self.epochs_var.get().strip() or "30",
+                    "--lr", self.lr_var.get().strip() or "1e-3",
+                    "--num-workers", self.num_workers_var.get().strip() or "0",
+                    "--seed", self.train_seed_var.get().strip() or "42",
+                    "--checkpoint-name", self.string_ckpt_name_var.get().strip() or "string_cnn_best.pt",
+                    "--n-mels", self.n_mels_var.get().strip() or "64",
+                    "--hop-length", self.hop_length_var.get().strip() or "128",
+                    "--num-frames", self.num_frames_var.get().strip() or "96",
+                ]
+
+                self._log("=" * 60)
+                self._log("Starting STRING training...")
+                self._log("=" * 60)
+                self._log(" ".join(cmd))
+
+                env = dict(os.environ)
+                env["PYTHONUNBUFFERED"] = "1"
+
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(_project_root()),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                    env=env,
+                )
+
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if self._stop_requested and proc.poll() is None:
+                        proc.terminate()
+                    self._log(line.rstrip("\n"))
+
+                rc = proc.wait()
+                self._log(f"Training finished (exit code {rc}).")
+
+            except Exception as e:
+                self._log(f"Error running training: {e}")
+            finally:
+                if proc is not None and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                self._set_busy(False)
+
+        self._start_worker(work)
+
+
+# ============================
+# MAIN
+# ============================
 
 def main() -> None:
     app = TrainGUI()

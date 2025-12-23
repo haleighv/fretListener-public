@@ -1,0 +1,21 @@
+============================================================
+DISAMBIGUATOR TRAINING SUMMARY - A_D
+============================================================
+
+Run directory: artifacts/models/disambig_batch_20251222_195031/A_D
+Device: mps
+
+Dataset: 1508 train, 266 val
+Epochs: 50, Batch: 32, LR: 0.001, Patience: 10
+
+Best epoch: 20, Val acc: 1.0000, Val loss: 0.1289
+
+Per-MIDI accuracy:
+  MIDI 50 (D3): 1.0000
+  MIDI 51 (D#3): 1.0000
+  MIDI 52 (E3): 1.0000
+  MIDI 53 (F3): 1.0000
+  MIDI 54 (F#3): 1.0000
+  MIDI 55 (G3): 1.0000
+  MIDI 56 (G#3): 1.0000
+  MIDI 57 (A3): 1.0000

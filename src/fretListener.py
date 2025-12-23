@@ -48,6 +48,7 @@ for p in [str(SRC_DIR), str(COMMON_DIR), str(REPO_ROOT)]:
 # Import models
 from note_model import NoteCNN
 from string_model import StringCNN
+from disambiguator_model import DisambiguatorCNN, STRING_OPEN_MIDI, ALL_PAIRS
 
 # Import common utilities
 from common.audio import (
@@ -83,11 +84,13 @@ VERSION = "3.0"
 
 MODE_NOTE_ONLY = "note"
 MODE_NOTE_STRING = "note+string"
+MODE_NOTE_DISAMBIG = "note+disambig"
 
-MODES = [MODE_NOTE_ONLY, MODE_NOTE_STRING]
+MODES = [MODE_NOTE_ONLY, MODE_NOTE_STRING, MODE_NOTE_DISAMBIG]
 MODE_LABELS = {
     MODE_NOTE_ONLY: "Note Only",
     MODE_NOTE_STRING: "Note + String",
+    MODE_NOTE_DISAMBIG: "Note + Disambig",
 }
 
 
@@ -388,6 +391,7 @@ class FretListenerGUI:
         self.params = {
             'note_checkpoint': 'artifacts/models/note_cnn_best.pt',
             'string_checkpoint': 'artifacts/models/string_cnn_best.pt',
+            'disambig_dir': 'artifacts/models/disambig_batch',
             'trigger_threshold': 0.01,
             'pre_ms': 50.0,
             'post_ms': 500.0,
@@ -489,6 +493,15 @@ class FretListenerGUI:
         string_ckpt_frame.pack(fill="x", pady=(2, 0))
         ttk.Entry(string_ckpt_frame, textvariable=self.string_checkpoint_var, width=30).pack(side="left", fill="x", expand=True)
         ttk.Button(string_ckpt_frame, text="Browse", command=self._browse_string_checkpoint, style="Action.TButton").pack(side="left", padx=(5, 0))
+
+        # Disambiguator model frame (for note+disambig mode)
+        self.disambig_model_frame = ttk.Frame(model_frame)
+        ttk.Label(self.disambig_model_frame, text="Disambig directory:").pack(anchor="w")
+        self.disambig_dir_var = tk.StringVar(value=self.params.get('disambig_dir', ''))
+        disambig_dir_frame = ttk.Frame(self.disambig_model_frame)
+        disambig_dir_frame.pack(fill="x", pady=(2, 0))
+        ttk.Entry(disambig_dir_frame, textvariable=self.disambig_dir_var, width=30).pack(side="left", fill="x", expand=True)
+        ttk.Button(disambig_dir_frame, text="Browse", command=self._browse_disambig_dir, style="Action.TButton").pack(side="left", padx=(5, 0))
 
         # Audio Device
         device_frame = ttk.LabelFrame(left_col, text="Audio Device", padding="10")
@@ -625,10 +638,15 @@ class FretListenerGUI:
         mode = self.mode_var.get()
         self.inference_mode = mode
         
-        if mode == MODE_NOTE_ONLY:
-            self.string_model_frame.pack_forget()
-        else:
+        # Hide all optional model frames first
+        self.string_model_frame.pack_forget()
+        self.disambig_model_frame.pack_forget()
+        
+        # Show relevant frame based on mode
+        if mode == MODE_NOTE_STRING:
             self.string_model_frame.pack(fill="x")
+        elif mode == MODE_NOTE_DISAMBIG:
+            self.disambig_model_frame.pack(fill="x")
 
     def _sync_monitor_enabled(self):
         """Sync monitor enabled state."""
@@ -651,6 +669,12 @@ class FretListenerGUI:
         )
         if filename:
             self.string_checkpoint_var.set(filename)
+
+    def _browse_disambig_dir(self):
+        """Browse for disambiguator models directory."""
+        dirname = filedialog.askdirectory(title="Select disambiguator models directory")
+        if dirname:
+            self.disambig_dir_var.set(dirname)
 
     def _browse_save_dir(self):
         """Browse for save directory."""
@@ -735,6 +759,7 @@ class FretListenerGUI:
         """Update parameters from GUI."""
         self.params['note_checkpoint'] = self.note_checkpoint_var.get()
         self.params['string_checkpoint'] = self.string_checkpoint_var.get()
+        self.params['disambig_dir'] = self.disambig_dir_var.get()
         self.params['save_dir'] = self.save_dir_var.get() if self.save_enabled_var.get() else ""
         
         for key, var in self.param_vars.items():
@@ -787,7 +812,7 @@ class FretListenerGUI:
         
         return SequentialNoteCNN(num_classes, n_mels).to(device)
 
-    def _load_checkpoints(self, note_path: Path, string_path: Optional[Path], device):
+    def _load_checkpoints(self, note_path: Path, string_path: Optional[Path], device, disambig_dir: Optional[Path] = None):
         """Load model checkpoints."""
         # Load note model
         note_ckpt = torch.load(note_path, map_location=device)
@@ -889,6 +914,63 @@ class FretListenerGUI:
             state["string_hop_length"] = string_hop_length
             state["string_num_frames"] = string_num_frames
         
+        # Load disambiguator models if in note+disambig mode
+        if disambig_dir and disambig_dir.exists():
+            state["disambig_models"] = {}
+            state["disambig_mel_transforms"] = {}
+            
+            # Map string pair names to directory names
+            pair_names = ['E_A', 'A_D', 'D_G', 'G_B', 'B_e']
+            
+            for pair_name in pair_names:
+                # Try both batch directory structure and single model structure
+                ckpt_path = disambig_dir / pair_name / "disambig_best.pt"
+                if not ckpt_path.exists():
+                    ckpt_path = disambig_dir / f"disambig_{pair_name.lower()}_best.pt"
+                if not ckpt_path.exists():
+                    continue
+                
+                try:
+                    ckpt = torch.load(ckpt_path, map_location='cpu')
+                    disambig_mel_params = ckpt.get("mel_params", {})
+                    
+                    disambig_n_mels = disambig_mel_params.get("n_mels", 64)
+                    disambig_hop_length = disambig_mel_params.get("hop_length", 128)
+                    disambig_num_frames = disambig_mel_params.get("num_frames", 32)
+                    disambig_n_fft = disambig_mel_params.get("n_fft", 1024)
+                    disambig_f_min = disambig_mel_params.get("f_min", 55.0)
+                    disambig_f_max = disambig_mel_params.get("f_max", 3000.0)
+                    
+                    model = DisambiguatorCNN(n_mels=disambig_n_mels, num_frets=13)
+                    # Initialize with dummy forward pass
+                    dummy = torch.zeros(1, 1, disambig_n_mels, disambig_num_frames)
+                    dummy_fret = torch.zeros(1, dtype=torch.long)
+                    with torch.no_grad():
+                        model(dummy, dummy_fret, dummy_fret)
+                    model.load_state_dict(ckpt["model_state"])
+                    model = model.to(device)
+                    model.eval()
+                    
+                    mel_spec, db_transform = create_mel_transforms(
+                        sample_rate=sample_rate,
+                        n_fft=disambig_n_fft,
+                        hop_length=disambig_hop_length,
+                        n_mels=disambig_n_mels,
+                        f_min=disambig_f_min,
+                        f_max=disambig_f_max,
+                    )
+                    
+                    state["disambig_models"][pair_name] = {
+                        "model": model,
+                        "mel_spec": mel_spec,
+                        "db_transform": db_transform,
+                        "n_mels": disambig_n_mels,
+                        "hop_length": disambig_hop_length,
+                        "num_frames": disambig_num_frames,
+                    }
+                except Exception as e:
+                    print(f"Warning: Failed to load disambiguator {pair_name}: {e}")
+        
         return state
 
     def start_inference(self):
@@ -909,6 +991,12 @@ class FretListenerGUI:
             string_path = Path(self.params['string_checkpoint'])
             if not string_path.exists():
                 messagebox.showerror("Error", f"String checkpoint not found: {string_path}")
+                return
+        
+        if self.inference_mode == MODE_NOTE_DISAMBIG:
+            disambig_dir = Path(self.params['disambig_dir'])
+            if not disambig_dir.exists():
+                messagebox.showerror("Error", f"Disambiguator directory not found: {disambig_dir}")
                 return
         
         if self.params['device_idx'] is None:
@@ -938,10 +1026,13 @@ class FretListenerGUI:
             
             note_path = Path(self.params['note_checkpoint'])
             string_path = None
+            disambig_dir = None
             if self.inference_mode == MODE_NOTE_STRING:
                 string_path = Path(self.params['string_checkpoint'])
+            elif self.inference_mode == MODE_NOTE_DISAMBIG:
+                disambig_dir = Path(self.params['disambig_dir'])
             
-            self.state = self._load_checkpoints(note_path, string_path, model_device)
+            self.state = self._load_checkpoints(note_path, string_path, model_device, disambig_dir)
             
             sr = self.state["sample_rate"]
             attack = self.state["attack_samples"]
@@ -1176,6 +1267,8 @@ class FretListenerGUI:
         
         if self.inference_mode == MODE_NOTE_ONLY:
             self._process_note_only(captured)
+        elif self.inference_mode == MODE_NOTE_DISAMBIG:
+            self._process_note_and_disambig(captured)
         else:
             self._process_note_and_string(captured)
 
@@ -1268,6 +1361,142 @@ class FretListenerGUI:
         
         if self.params['save_dir']:
             self._save_captured_audio(captured, best_window, f"{name}_S{final_string_idx+1}_F{final_fret}", note_prob)
+
+    def _process_note_and_disambig(self, captured):
+        """Process with note model + disambiguator models."""
+        cs = self.capture_state
+        
+        # Sweep for best window using note model
+        best_start, best_window, best_note_topk = self._sweep_best_window_note(
+            captured=captured,
+            sweep_step_samples=cs['sweep_step_samples'],
+            topk=5
+        )
+        
+        if not best_note_topk:
+            self._send_message('log', "No note candidates found")
+            return
+        
+        # Get note prediction
+        midi, name, note_prob = self._decide_note(best_note_topk, self.params.get('margin', 0.1))
+        
+        # Find which string pairs this note is ambiguous for
+        final_string_idx, final_fret, disambig_info = self._disambiguate_note(midi, best_window)
+        
+        # Update UI
+        self._send_message('note', name)
+        self._send_message('confidence', f"Note: {note_prob:.3f}{disambig_info}")
+        
+        disp_s = self._to_display_string_num(final_string_idx)
+        open_name = self._string_open_name(final_string_idx)
+        self._send_message('midi', f"MIDI: {midi} | String: {disp_s} ({open_name}) | Fret: {final_fret}")
+        self._send_message('reason', "")
+        
+        self._send_message('fretboard', (final_string_idx, final_fret))
+        self._send_message('light', 'detected')
+        
+        topk_note_str = ", ".join([f"{n}({p:.2f})" for _, n, p in best_note_topk[:5]])
+        self._send_message('log', f"Detected: {name} | Pos: S{disp_s} F{final_fret} | TopK: {topk_note_str}")
+        
+        if self.params['save_dir']:
+            self._save_captured_audio(captured, best_window, f"{name}_S{final_string_idx+1}_F{final_fret}", note_prob)
+
+    def _disambiguate_note(self, midi, window):
+        """Use disambiguator models to determine string/fret position.
+        
+        Returns: (string_idx, fret, info_string)
+        """
+        # Get all possible positions for this MIDI note
+        positions = []
+        for string_num, open_midi in STRING_OPEN_MIDI.items():
+            fret = midi - open_midi
+            if 0 <= fret <= 12:
+                positions.append((string_num, fret))
+        
+        if not positions:
+            # Should not happen, but fallback
+            return 0, 0, " | No positions"
+        
+        if len(positions) == 1:
+            # Unambiguous - only one position
+            string_num, fret = positions[0]
+            return string_num - 1, fret, " | Unambiguous"  # Convert to 0-indexed
+        
+        # Check which disambiguators we have and which are relevant
+        disambig_models = self.state.get("disambig_models", {})
+        
+        # Find which string pair(s) this note belongs to
+        # Format: pair_name -> (string_a, string_b) where both are 1-indexed
+        relevant_pairs = []
+        for pair_name, pair_info in ALL_PAIRS.items():
+            if midi in pair_info:
+                relevant_pairs.append(pair_name)
+        
+        if not relevant_pairs:
+            # No relevant disambiguator - pick lowest fret position
+            positions.sort(key=lambda x: x[1])
+            string_num, fret = positions[0]
+            return string_num - 1, fret, " | No disambig"
+        
+        # Run relevant disambiguators
+        results = {}
+        for pair_name in relevant_pairs:
+            if pair_name not in disambig_models:
+                continue
+            
+            dm = disambig_models[pair_name]
+            pair_info = ALL_PAIRS[pair_name]
+            
+            if midi not in pair_info:
+                continue
+            
+            midi_info = pair_info[midi]
+            string_a, fret_a = midi_info[0]
+            string_b, fret_b = midi_info[1]
+            
+            # Run inference
+            prob_a, prob_b = self._run_disambiguator(window, dm, fret_a, fret_b)
+            
+            if prob_a > prob_b:
+                results[pair_name] = (string_a, fret_a, prob_a)
+            else:
+                results[pair_name] = (string_b, fret_b, prob_b)
+        
+        if not results:
+            # No disambiguator succeeded - pick lowest fret
+            positions.sort(key=lambda x: x[1])
+            string_num, fret = positions[0]
+            return string_num - 1, fret, " | Disambig N/A"
+        
+        # Use first result (should only be one pair per note typically)
+        pair_name = list(results.keys())[0]
+        string_num, fret, prob = results[pair_name]
+        
+        return string_num - 1, fret, f" | {pair_name}: {prob:.2f}"
+
+    def _run_disambiguator(self, window, dm, fret_a, fret_b):
+        """Run a single disambiguator model."""
+        import torch.nn.functional as F
+        
+        device = self.state["device"]
+        model = dm["model"]
+        mel_spec = dm["mel_spec"]
+        db_transform = dm["db_transform"]
+        num_frames = dm["num_frames"]
+        
+        # Preprocess using common module
+        spec = waveform_to_logmel_torch(
+            window, mel_spec, db_transform, device, num_frames
+        )
+        
+        fret_a_t = torch.tensor([fret_a], dtype=torch.long).to(device)
+        fret_b_t = torch.tensor([fret_b], dtype=torch.long).to(device)
+        
+        with torch.no_grad():
+            logits = model(spec, fret_a_t, fret_b_t)
+            probs = F.softmax(logits, dim=1)
+        
+        return probs[0, 0].item(), probs[0, 1].item()
 
     def _sweep_best_window_note(self, captured, sweep_step_samples, topk=5):
         """Find the best window for note classification."""

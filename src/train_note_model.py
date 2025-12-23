@@ -672,6 +672,8 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--patience", type=int, default=0,
+                       help="Early stopping patience (0 = disabled)")
 
     parser.add_argument("--n-mels", type=int, default=64)
     parser.add_argument("--hop-length", type=int, default=128)
@@ -785,6 +787,7 @@ def main():
     best_val_acc = 0.0
     best_val_loss = float("inf")
     best_epoch = -1
+    patience_counter = 0
     checkpoint_path = run_dir / args.checkpoint_name
 
     # Training loop
@@ -822,6 +825,7 @@ def main():
             best_val_acc = val_acc
             best_val_loss = val_loss
             best_epoch = epoch
+            patience_counter = 0
             checkpoint = {
                 "model_state": model.state_dict(),
                 "num_classes": num_classes,
@@ -851,10 +855,18 @@ def main():
                     "scheduler_mode": scheduler_mode,
                     "scheduler_factor": scheduler_factor,
                     "scheduler_patience": scheduler_patience,
+                    "early_stopping_patience": args.patience,
                 },
             }
             torch.save(checkpoint, checkpoint_path)
             print(f"Saved new best checkpoint to {checkpoint_path}")
+        else:
+            patience_counter += 1
+        
+        # Early stopping
+        if args.patience > 0 and patience_counter >= args.patience:
+            print(f"\nEarly stopping at epoch {epoch+1} (patience={args.patience})")
+            break
 
     # Reload best model for final evaluation and artifact generation
     if best_epoch >= 0 and checkpoint_path.is_file():

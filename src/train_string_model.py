@@ -667,6 +667,8 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--patience", type=int, default=0,
+                       help="Early stopping patience (0 = disabled)")
 
     parser.add_argument("--n-mels", type=int, default=48)
     parser.add_argument("--hop-length", type=int, default=256)
@@ -756,6 +758,7 @@ def main():
     best_val_acc = 0.0
     best_val_loss = float("inf")
     best_epoch = -1
+    patience_counter = 0
     checkpoint_path = run_dir / args.checkpoint_name
 
     for epoch in range(args.epochs):
@@ -781,6 +784,7 @@ def main():
             best_val_acc = val_acc
             best_val_loss = val_loss
             best_epoch = epoch
+            patience_counter = 0
 
             checkpoint = {
                 "model_state": model.state_dict(),
@@ -813,6 +817,9 @@ def main():
                     "patience": args.lr_patience,
                     "step_metric": "val_acc",
                 },
+                "training_params": {
+                    "early_stopping_patience": args.patience,
+                },
                 "label_schema": {
                     "csv_base_detected": int(train_ds.base),  # 0 => CSV 0..5, 1 => CSV 1..6
                     "train_label_range": "0..5",
@@ -821,6 +828,13 @@ def main():
             }
             torch.save(checkpoint, checkpoint_path)
             print(f"Saved new best checkpoint to {checkpoint_path}")
+        else:
+            patience_counter += 1
+        
+        # Early stopping
+        if args.patience > 0 and patience_counter >= args.patience:
+            print(f"\nEarly stopping at epoch {epoch+1} (patience={args.patience})")
+            break
 
     if best_epoch >= 0 and checkpoint_path.is_file():
         ckpt = torch.load(checkpoint_path, map_location=device)

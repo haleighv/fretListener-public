@@ -79,6 +79,46 @@ VERSION = "3.0"
 
 
 # ============================
+# SETTINGS CACHE
+# ============================
+
+import json
+
+def _get_settings_path() -> Path:
+    """Get path to settings cache file."""
+    # Use ~/.config/fretListener on Unix, or same directory on others
+    if sys.platform == 'darwin' or sys.platform.startswith('linux'):
+        config_dir = Path.home() / ".config" / "fretListener"
+    else:
+        config_dir = Path(__file__).parent
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir / "settings.json"
+
+def _load_settings() -> dict:
+    """Load settings from cache file."""
+    settings_path = _get_settings_path()
+    if settings_path.exists():
+        try:
+            with open(settings_path, 'r') as f:
+                settings = json.load(f)
+                print(f"Loaded settings from {settings_path}")
+                return settings
+        except Exception as e:
+            print(f"Warning: Could not load settings: {e}")
+    return {}
+
+def _save_settings(settings: dict) -> None:
+    """Save settings to cache file."""
+    settings_path = _get_settings_path()
+    try:
+        with open(settings_path, 'w') as f:
+            json.dump(settings, f, indent=2)
+        print(f"Saved settings to {settings_path}")
+    except Exception as e:
+        print(f"Warning: Could not save settings: {e}")
+
+
+# ============================
 # INFERENCE MODES
 # ============================
 
@@ -407,16 +447,21 @@ class FretListenerGUI:
 
         self._setup_ui()
         self._refresh_devices()
+        self._load_cached_settings()  # Load settings after UI is built
         self._update_message_display()
 
     def _to_display_string_num(self, internal_string_idx: int) -> int:
         """Convert internal index (0=low E) to display number (6=low E)."""
-        return 6 - int(internal_string_idx)
+        result = 6 - int(internal_string_idx)
+        print(f"  _to_display_string_num({internal_string_idx}) = {result}")
+        return result
 
     def _string_open_name(self, internal_string_idx: int) -> str:
         """Get open string note name from internal index."""
         si = int(internal_string_idx)
-        return STRING_NAMES_BY_INDEX[si] if 0 <= si < 6 else f"S{si}"
+        result = STRING_NAMES_BY_INDEX[si] if 0 <= si < 6 else f"S{si}"
+        print(f"  _string_open_name({internal_string_idx}) = {result}")
+        return result
 
     def _setup_ui(self):
         """Set up the modern dark-mode UI."""
@@ -684,19 +729,43 @@ class FretListenerGUI:
 
     def _refresh_devices(self):
         """Refresh available audio devices."""
+        print("=== REFRESH DEVICES CALLED ===")
         try:
+            # Force PortAudio to rescan devices
+            sd._terminate()
+            sd._initialize()
+            
             devices = sd.query_devices()
+            print(f"Found {len(devices)} total audio devices")
             self.device_list = [
                 (i, d['name'])
                 for i, d in enumerate(devices)
                 if d.get('max_input_channels', 0) > 0
             ]
+            print(f"Found {len(self.device_list)} input devices:")
+            for idx, name in self.device_list:
+                print(f"  [{idx}] {name}")
+            
+            # Clear and update the combobox
             self.device_combo['values'] = [name for _, name in self.device_list]
+            
             if self.device_list:
                 self.device_combo.current(0)
                 self._on_device_selected()
+                print(f"Selected device: {self.device_list[0][1]}")
+            else:
+                print("No input devices found!")
+                self.device_combo.set('')
+                self.channel_combo['values'] = []
+                self.channel_combo.set('')
         except Exception as e:
-            self._log(f"Error refreshing devices: {e}")
+            import traceback
+            print(f"Error refreshing devices: {e}")
+            traceback.print_exc()
+            try:
+                self._log(f"Error refreshing devices: {e}")
+            except:
+                pass
 
     def _on_device_selected(self):
         """Handle device selection."""
@@ -754,6 +823,74 @@ class FretListenerGUI:
         """Add message to log."""
         self.log_text.insert(tk.END, msg + "\n")
         self.log_text.see(tk.END)
+
+    def _save_cached_settings(self):
+        """Save current settings to cache file."""
+        settings = {
+            'note_checkpoint': self.note_checkpoint_var.get(),
+            'string_checkpoint': self.string_checkpoint_var.get(),
+            'disambig_dir': self.disambig_dir_var.get(),
+            'inference_mode': self.inference_mode,
+            'device_name': self.device_var.get(),
+            'channel_idx': self.channel_combo.current(),
+            'monitor_enabled': self.monitor_var.get(),
+            'save_enabled': self.save_enabled_var.get(),
+            'save_dir': self.save_dir_var.get(),
+        }
+        # Save all param_vars dynamically
+        for key, var in self.param_vars.items():
+            settings[key] = var.get()
+        _save_settings(settings)
+
+    def _load_cached_settings(self):
+        """Load settings from cache file and apply to GUI."""
+        settings = _load_settings()
+        if not settings:
+            return
+        
+        # Model paths
+        if 'note_checkpoint' in settings:
+            self.note_checkpoint_var.set(settings['note_checkpoint'])
+        if 'string_checkpoint' in settings:
+            self.string_checkpoint_var.set(settings['string_checkpoint'])
+        if 'disambig_dir' in settings:
+            self.disambig_dir_var.set(settings['disambig_dir'])
+        
+        # Inference mode
+        if 'inference_mode' in settings and settings['inference_mode'] in MODES:
+            self.inference_mode = settings['inference_mode']
+            self.mode_var.set(settings['inference_mode'])
+            self._on_mode_change()
+        
+        # Audio device - try to find by name
+        if 'device_name' in settings:
+            device_name = settings['device_name']
+            for i, (_, name) in enumerate(self.device_list):
+                if name == device_name:
+                    self.device_combo.current(i)
+                    self._on_device_selected()
+                    break
+        
+        # Channel
+        if 'channel_idx' in settings:
+            ch_idx = settings['channel_idx']
+            if 0 <= ch_idx < len(self.channel_list):
+                self.channel_combo.current(ch_idx)
+        
+        # Monitor
+        if 'monitor_enabled' in settings:
+            self.monitor_var.set(settings['monitor_enabled'])
+        
+        # Save options
+        if 'save_enabled' in settings:
+            self.save_enabled_var.set(settings['save_enabled'])
+        if 'save_dir' in settings:
+            self.save_dir_var.set(settings['save_dir'])
+        
+        # Load all param_vars dynamically
+        for key, var in self.param_vars.items():
+            if key in settings:
+                var.set(settings[key])
 
     def _update_params(self):
         """Update parameters from GUI."""
@@ -832,13 +969,18 @@ class FretListenerGUI:
         
         # Support both old (idx_to_midi) and new (idx_to_pos/pos_to_meta) checkpoint formats
         idx_to_midi = note_ckpt.get("idx_to_midi", None)
+        print(f"Checkpoint format debug:")
+        print(f"  idx_to_midi present: {idx_to_midi is not None}")
         if idx_to_midi is not None:
+            print(f"  idx_to_midi sample: {dict(list(idx_to_midi.items())[:5])}")
             # Old format: direct idx -> MIDI mapping
             if isinstance(idx_to_midi, dict):
                 idx_to_midi = {int(k): int(v) for k, v in idx_to_midi.items()}
         
         idx_to_pos = note_ckpt.get("idx_to_pos", {i: i for i in range(num_classes)})
         pos_to_meta = note_ckpt.get("pos_to_meta", {})
+        print(f"  idx_to_pos sample: {dict(list(idx_to_pos.items())[:5]) if idx_to_pos else 'empty'}")
+        print(f"  pos_to_meta sample: {dict(list(pos_to_meta.items())[:5]) if pos_to_meta else 'empty'}")
         
         # Detect model architecture from state dict keys
         state_dict = note_ckpt["model_state"]
@@ -980,6 +1122,7 @@ class FretListenerGUI:
         
         self._update_params()
         self._sync_monitor_enabled()
+        self._save_cached_settings()  # Save settings when starting capture
         
         # Validate checkpoints
         note_path = Path(self.params['note_checkpoint'])
@@ -1148,6 +1291,9 @@ class FretListenerGUI:
             except queue.Empty:
                 continue
             except Exception as e:
+                import traceback
+                print(f"Processing error: {e}")
+                traceback.print_exc()
                 self._send_message('log', f"Processing error: {e}")
 
     def _process_audio_block(self, indata, mono):
@@ -1360,7 +1506,7 @@ class FretListenerGUI:
         self._send_message('log', f"Detected: {name} | Pos: S{disp_s} F{final_fret} | NoteTopK: {topk_note_str} | StringTopK: {topk_str_str}")
         
         if self.params['save_dir']:
-            self._save_captured_audio(captured, best_window, f"{name}_S{final_string_idx+1}_F{final_fret}", note_prob)
+            self._save_captured_audio(captured, best_window, f"{name}_S{disp_s}_F{final_fret}", note_prob)
 
     def _process_note_and_disambig(self, captured):
         """Process with note model + disambiguator models."""
@@ -1399,13 +1545,18 @@ class FretListenerGUI:
         self._send_message('log', f"Detected: {name} | Pos: S{disp_s} F{final_fret} | TopK: {topk_note_str}")
         
         if self.params['save_dir']:
-            self._save_captured_audio(captured, best_window, f"{name}_S{final_string_idx+1}_F{final_fret}", note_prob)
+            self._save_captured_audio(captured, best_window, f"{name}_S{disp_s}_F{final_fret}", note_prob)
 
     def _disambiguate_note(self, midi, window):
         """Use disambiguator models to determine string/fret position.
         
         Returns: (string_idx, fret, info_string)
+        
+        Note: string_idx is 0-indexed where 0=low E, 5=high E
+              This is opposite to string_num in data where 1=high E, 6=low E
         """
+        print(f"=== _disambiguate_note called with midi={midi} ===")
+        
         # Get all possible positions for this MIDI note
         positions = []
         for string_num, open_midi in STRING_OPEN_MIDI.items():
@@ -1413,17 +1564,29 @@ class FretListenerGUI:
             if 0 <= fret <= 12:
                 positions.append((string_num, fret))
         
+        print(f"  STRING_OPEN_MIDI = {STRING_OPEN_MIDI}")
+        print(f"  positions = {positions}")
+        
         if not positions:
-            # Should not happen, but fallback
+            print("  ERROR: No positions found!")
             return 0, 0, " | No positions"
+        
+        # Convert string_num (1=high E, 6=low E) to string_idx (0=low E, 5=high E)
+        def string_num_to_idx(sn):
+            result = 6 - sn  # string_num 6 -> idx 0, string_num 1 -> idx 5
+            print(f"  string_num_to_idx({sn}) = {result}")
+            return result
         
         if len(positions) == 1:
             # Unambiguous - only one position
             string_num, fret = positions[0]
-            return string_num - 1, fret, " | Unambiguous"  # Convert to 0-indexed
+            string_idx = string_num_to_idx(string_num)
+            print(f"  Unambiguous: string_num={string_num}, fret={fret}, string_idx={string_idx}")
+            return string_idx, fret, " | Unambiguous"
         
         # Check which disambiguators we have and which are relevant
         disambig_models = self.state.get("disambig_models", {})
+        print(f"  Loaded disambiguators: {list(disambig_models.keys())}")
         
         # Find which string pair(s) this note belongs to
         # Format: pair_name -> (string_a, string_b) where both are 1-indexed
@@ -1432,16 +1595,20 @@ class FretListenerGUI:
             if midi in pair_info:
                 relevant_pairs.append(pair_name)
         
+        print(f"  Relevant pairs for MIDI {midi}: {relevant_pairs}")
+        
         if not relevant_pairs:
             # No relevant disambiguator - pick lowest fret position
             positions.sort(key=lambda x: x[1])
             string_num, fret = positions[0]
-            return string_num - 1, fret, " | No disambig"
+            print(f"  No relevant pairs, picking lowest fret: string_num={string_num}, fret={fret}")
+            return string_num_to_idx(string_num), fret, " | No disambig"
         
         # Run relevant disambiguators
         results = {}
         for pair_name in relevant_pairs:
             if pair_name not in disambig_models:
+                print(f"  Pair {pair_name} not in loaded models, skipping")
                 continue
             
             dm = disambig_models[pair_name]
@@ -1456,6 +1623,7 @@ class FretListenerGUI:
             
             # Run inference
             prob_a, prob_b = self._run_disambiguator(window, dm, fret_a, fret_b)
+            print(f"  Disambig {pair_name}: prob_a={prob_a:.3f} (S{string_a} F{fret_a}), prob_b={prob_b:.3f} (S{string_b} F{fret_b})")
             
             if prob_a > prob_b:
                 results[pair_name] = (string_a, fret_a, prob_a)
@@ -1466,13 +1634,13 @@ class FretListenerGUI:
             # No disambiguator succeeded - pick lowest fret
             positions.sort(key=lambda x: x[1])
             string_num, fret = positions[0]
-            return string_num - 1, fret, " | Disambig N/A"
+            return string_num_to_idx(string_num), fret, " | Disambig N/A"
         
         # Use first result (should only be one pair per note typically)
         pair_name = list(results.keys())[0]
         string_num, fret, prob = results[pair_name]
         
-        return string_num - 1, fret, f" | {pair_name}: {prob:.2f}"
+        return string_num_to_idx(string_num), fret, f" | {pair_name}: {prob:.2f}"
 
     def _run_disambiguator(self, window, dm, fret_a, fret_b):
         """Run a single disambiguator model."""
@@ -1484,9 +1652,12 @@ class FretListenerGUI:
         db_transform = dm["db_transform"]
         num_frames = dm["num_frames"]
         
+        # Peak normalize before inference (matches training)
+        w = peak_normalize(window)
+        
         # Preprocess using common module
         spec = waveform_to_logmel_torch(
-            window, mel_spec, db_transform, device, num_frames
+            w, mel_spec, db_transform, num_frames, device
         )
         
         fret_a_t = torch.tensor([fret_a], dtype=torch.long).to(device)
@@ -1605,10 +1776,16 @@ class FretListenerGUI:
         if "midi" in meta:
             return meta["midi"]
         
-        # Fallback: assume 8 frets per string
-        frets_per_string = 8
+        # Fallback: assume 13 frets per string (0-12)
+        frets_per_string = 13
         string_idx = pos // frets_per_string
         fret = pos % frets_per_string
+        
+        # Bounds check
+        if string_idx >= len(STANDARD_TUNING_LIST):
+            print(f"WARNING: pos={pos} -> string_idx={string_idx} out of bounds, clamping")
+            string_idx = len(STANDARD_TUNING_LIST) - 1
+        
         return STANDARD_TUNING_LIST[string_idx] + fret
 
     def _decide_note(self, topk, margin=0.1):
@@ -1616,8 +1793,16 @@ class FretListenerGUI:
         if not topk:
             return 0, "--", 0.0
         
-        pos, name, prob = topk[0]
-        midi = self._pos_to_midi(pos)
+        first_val, name, prob = topk[0]
+        
+        # If idx_to_midi is present, first_val is already MIDI
+        # Otherwise, first_val is position and we need to convert
+        if self.state.get("idx_to_midi") is not None:
+            midi = first_val  # Already MIDI from old format
+        else:
+            midi = self._pos_to_midi(first_val)  # Convert from position
+        
+        print(f"  _decide_note: first_val={first_val}, name={name}, midi={midi}")
         return midi, name, prob
 
     def _decide_string(self, topk, margin=0.1):
@@ -1707,6 +1892,9 @@ class FretListenerGUI:
 # ============================
 
 def main():
+    print("=" * 60)
+    print("fretListener.py - VERSION 2025-12-23 20:30 UTC")
+    print("=" * 60)
     root = tk.Tk()
     root.minsize(1000, 700)
     app = FretListenerGUI(root)

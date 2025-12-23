@@ -1,0 +1,40 @@
+{
+  "timestamp": "20251223_125319",
+  "results": {
+    "E_A": {
+      "status": "success",
+      "pair": "E_A",
+      "best_val_acc": 1.0,
+      "best_epoch": 44,
+      "run_dir": "artifacts/models/disambig_batch_20251223_125319/E_A"
+    },
+    "A_D": {
+      "status": "success",
+      "pair": "A_D",
+      "best_val_acc": 0.981203007518797,
+      "best_epoch": 19,
+      "run_dir": "artifacts/models/disambig_batch_20251223_125319/A_D"
+    },
+    "D_G": {
+      "status": "success",
+      "pair": "D_G",
+      "best_val_acc": 0.9924812030075187,
+      "best_epoch": 13,
+      "run_dir": "artifacts/models/disambig_batch_20251223_125319/D_G"
+    },
+    "G_B": {
+      "status": "success",
+      "pair": "G_B",
+      "best_val_acc": 0.9970059880239521,
+      "best_epoch": 20,
+      "run_dir": "artifacts/models/disambig_batch_20251223_125319/G_B"
+    },
+    "B_e": {
+      "status": "success",
+      "pair": "B_e",
+      "best_val_acc": 0.9887218045112782,
+      "best_epoch": 12,
+      "run_dir": "artifacts/models/disambig_batch_20251223_125319/B_e"
+    }
+  }
+}

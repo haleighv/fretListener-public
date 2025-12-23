@@ -1076,12 +1076,16 @@ class FretListenerGUI:
                     ckpt = torch.load(ckpt_path, map_location='cpu')
                     disambig_mel_params = ckpt.get("mel_params", {})
                     
+                    # Use disambiguator's own sample rate, not note model's
+                    disambig_sample_rate = ckpt.get("sample_rate", 16000)
                     disambig_n_mels = disambig_mel_params.get("n_mels", 64)
                     disambig_hop_length = disambig_mel_params.get("hop_length", 128)
                     disambig_num_frames = disambig_mel_params.get("num_frames", 32)
                     disambig_n_fft = disambig_mel_params.get("n_fft", 1024)
                     disambig_f_min = disambig_mel_params.get("f_min", 55.0)
                     disambig_f_max = disambig_mel_params.get("f_max", 3000.0)
+                    
+                    print(f"  Loading {pair_name}: sr={disambig_sample_rate}, n_mels={disambig_n_mels}, frames={disambig_num_frames}")
                     
                     model = DisambiguatorCNN(n_mels=disambig_n_mels, num_frets=13)
                     # Initialize with dummy forward pass
@@ -1094,7 +1098,7 @@ class FretListenerGUI:
                     model.eval()
                     
                     mel_spec, db_transform = create_mel_transforms(
-                        sample_rate=sample_rate,
+                        sample_rate=disambig_sample_rate,  # Use disambiguator's sample rate!
                         n_fft=disambig_n_fft,
                         hop_length=disambig_hop_length,
                         n_mels=disambig_n_mels,
@@ -1109,6 +1113,7 @@ class FretListenerGUI:
                         "n_mels": disambig_n_mels,
                         "hop_length": disambig_hop_length,
                         "num_frames": disambig_num_frames,
+                        "sample_rate": disambig_sample_rate,  # Store for resampling
                     }
                 except Exception as e:
                     print(f"Warning: Failed to load disambiguator {pair_name}: {e}")
@@ -1625,6 +1630,7 @@ class FretListenerGUI:
             prob_a, prob_b = self._run_disambiguator(window, dm, fret_a, fret_b)
             print(f"  Disambig {pair_name}: prob_a={prob_a:.3f} (S{string_a} F{fret_a}), prob_b={prob_b:.3f} (S{string_b} F{fret_b})")
             
+            # Pick the option with higher probability
             if prob_a > prob_b:
                 results[pair_name] = (string_a, fret_a, prob_a)
             else:
@@ -1645,15 +1651,22 @@ class FretListenerGUI:
     def _run_disambiguator(self, window, dm, fret_a, fret_b):
         """Run a single disambiguator model."""
         import torch.nn.functional as F
+        import librosa
         
         device = self.state["device"]
         model = dm["model"]
         mel_spec = dm["mel_spec"]
         db_transform = dm["db_transform"]
         num_frames = dm["num_frames"]
+        disambig_sr = dm.get("sample_rate", 16000)
+        capture_sr = self.state["sample_rate"]
         
         # Peak normalize before inference (matches training)
         w = peak_normalize(window)
+        
+        # Resample if needed (capture is at 48kHz, disambiguator trained at 16kHz)
+        if capture_sr != disambig_sr:
+            w = librosa.resample(w, orig_sr=capture_sr, target_sr=disambig_sr)
         
         # Preprocess using common module
         spec = waveform_to_logmel_torch(

@@ -1632,10 +1632,10 @@ class FretListenerGUI:
             string_a, fret_a = midi_info[0]
             string_b, fret_b = midi_info[1]
             
-            # Only run if both strings are still candidates
-            if string_a not in candidates and string_b not in candidates:
-                print(f"  Skipping {pair_name}: neither S{string_a} nor S{string_b} in candidates")
-                continue
+            # Only run if BOTH strings are still candidates
+            # if string_a not in candidates or string_b not in candidates:
+            #     print(f"  Skipping {pair_name}: S{string_a} or S{string_b} already eliminated")
+            #     continue
             
             # Run inference
             prob_a, prob_b = self._run_disambiguator(window, dm, fret_a, fret_b)

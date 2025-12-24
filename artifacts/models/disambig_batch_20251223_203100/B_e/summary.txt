@@ -1,0 +1,21 @@
+============================================================
+DISAMBIGUATOR TRAINING SUMMARY - B_e
+============================================================
+
+Run directory: artifacts/models/disambig_batch_20251223_203100/B_e
+Device: mps
+
+Dataset: 544 train, 96 val
+Epochs: 50, Batch: 64, LR: 0.001, Patience: 10
+
+Best epoch: 25, Val acc: 1.0000, Val loss: 0.1370
+
+Per-MIDI accuracy:
+  MIDI 64 (E4): 1.0000
+  MIDI 65 (F4): 1.0000
+  MIDI 66 (F#4): 1.0000
+  MIDI 67 (G4): 1.0000
+  MIDI 68 (G#4): 1.0000
+  MIDI 69 (A4): 1.0000
+  MIDI 70 (A#4): 1.0000
+  MIDI 71 (B4): 1.0000

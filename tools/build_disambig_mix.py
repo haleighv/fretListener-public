@@ -220,6 +220,31 @@ def build_disambig_mix(
             rows_by_midi_string[(midi, string)].append(row)
     
     # Balance: for each ambiguous MIDI, take equal samples from each string
+    # Also balance across MIDIs so notes with fewer samples don't get overwhelmed
+    midi_sample_counts = {}
+    
+    for midi in sorted(ambiguous.keys()):
+        rows_a = rows_by_midi_string.get((midi, string_a), [])
+        rows_b = rows_by_midi_string.get((midi, string_b), [])
+        
+        # Take minimum of the two to balance strings
+        n = min(len(rows_a), len(rows_b))
+        if n > 0:
+            midi_sample_counts[midi] = {
+                'rows_a': rows_a,
+                'rows_b': rows_b,
+                'available': n,
+            }
+        else:
+            print(f"  WARNING: No samples for MIDI {midi} on one or both strings!")
+    
+    if not midi_sample_counts:
+        raise SystemExit("No samples found for this string pair!")
+    
+    # Find minimum samples across all MIDIs for cross-MIDI balancing
+    min_samples = min(info['available'] for info in midi_sample_counts.values())
+    print(f"\n  Cross-MIDI balancing: using {min_samples} samples per MIDI note")
+    
     balanced_rows = []
     stats = {
         'midi_counts': {},
@@ -227,20 +252,17 @@ def build_disambig_mix(
         'string_b_total': 0,
     }
     
-    for midi in sorted(ambiguous.keys()):
-        rows_a = rows_by_midi_string.get((midi, string_a), [])
-        rows_b = rows_by_midi_string.get((midi, string_b), [])
+    for midi in sorted(midi_sample_counts.keys()):
+        info = midi_sample_counts[midi]
+        rows_a = info['rows_a']
+        rows_b = info['rows_b']
         
         # Shuffle before selecting
         random.shuffle(rows_a)
         random.shuffle(rows_b)
         
-        # Take minimum of the two to balance
-        n = min(len(rows_a), len(rows_b))
-        
-        if n == 0:
-            print(f"  WARNING: No samples for MIDI {midi} on one or both strings!")
-            continue
+        # Use min_samples for cross-MIDI balance
+        n = min_samples
         
         # Add to output
         selected_a = rows_a[:n]

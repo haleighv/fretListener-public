@@ -524,7 +524,7 @@ class TrainGUI(tk.Tk):
         self._run_subprocess(cmd)
 
     def _train_disambig(self) -> None:
-        script = _project_root() / "src" / "train_disambiguator_model.py"
+        script = _project_root() / "tools" / "train_disambiguator.py"
         mix_dir = self.disambig_output_dir_var.get()
 
         cmd = [_python_exec(), str(script), "--batch", "--mix-dir", mix_dir,

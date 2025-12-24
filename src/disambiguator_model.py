@@ -230,7 +230,7 @@ def get_ambiguous_positions(midi_note: int, max_fret: int = 12) -> list:
     return positions
 
 
-def get_string_pair_ambiguities(string_a: int, string_b: int, max_fret: int = 7) -> dict:
+def get_string_pair_ambiguities(string_a: int, string_b: int, max_fret: int = 12) -> dict:
     """
     Get all MIDI notes that are ambiguous between two strings.
     
@@ -262,18 +262,18 @@ def get_string_pair_ambiguities(string_a: int, string_b: int, max_fret: int = 7)
 
 
 # A/D string ambiguities (strings 5 and 4)
-A_D_AMBIGUITIES = get_string_pair_ambiguities(5, 4, max_fret=7)
+A_D_AMBIGUITIES = get_string_pair_ambiguities(5, 4, max_fret=12)
 
 # E/A string ambiguities (strings 6 and 5)  
-E_A_AMBIGUITIES = get_string_pair_ambiguities(6, 5, max_fret=7)
+E_A_AMBIGUITIES = get_string_pair_ambiguities(6, 5, max_fret=12)
 
 # All string pair ambiguities
 ALL_PAIRS = {
-    'E_A': get_string_pair_ambiguities(6, 5, max_fret=7),  # low E vs A
-    'A_D': get_string_pair_ambiguities(5, 4, max_fret=7),  # A vs D
-    'D_G': get_string_pair_ambiguities(4, 3, max_fret=7),  # D vs G
-    'G_B': get_string_pair_ambiguities(3, 2, max_fret=7),  # G vs B
-    'B_e': get_string_pair_ambiguities(2, 1, max_fret=7),  # B vs high e
+    'E_A': get_string_pair_ambiguities(6, 5, max_fret=12),  # low E vs A
+    'A_D': get_string_pair_ambiguities(5, 4, max_fret=12),  # A vs D
+    'D_G': get_string_pair_ambiguities(4, 3, max_fret=12),  # D vs G
+    'G_B': get_string_pair_ambiguities(3, 2, max_fret=12),  # G vs B
+    'B_e': get_string_pair_ambiguities(2, 1, max_fret=12),  # B vs high e
 }
 
 

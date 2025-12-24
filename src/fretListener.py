@@ -1555,6 +1555,9 @@ class FretListenerGUI:
     def _disambiguate_note(self, midi, window):
         """Use disambiguator models to determine string/fret position.
         
+        Uses Smart Chain approach: each disambiguator eliminates one candidate
+        from the set of possible positions. The survivor is the answer.
+        
         Returns: (string_idx, fret, info_string)
         
         Note: string_idx is 0-indexed where 0=low E, 5=high E
@@ -1593,8 +1596,11 @@ class FretListenerGUI:
         disambig_models = self.state.get("disambig_models", {})
         print(f"  Loaded disambiguators: {list(disambig_models.keys())}")
         
+        # Build candidate set: {string_num: fret}
+        candidates = {pos[0]: pos[1] for pos in positions}
+        print(f"  Initial candidates: {candidates}")
+        
         # Find which string pair(s) this note belongs to
-        # Format: pair_name -> (string_a, string_b) where both are 1-indexed
         relevant_pairs = []
         for pair_name, pair_info in ALL_PAIRS.items():
             if midi in pair_info:
@@ -1609,8 +1615,8 @@ class FretListenerGUI:
             print(f"  No relevant pairs, picking lowest fret: string_num={string_num}, fret={fret}")
             return string_num_to_idx(string_num), fret, " | No disambig"
         
-        # Run relevant disambiguators
-        results = {}
+        # Smart Chain: Run disambiguators and eliminate losers
+        disambig_info = []
         for pair_name in relevant_pairs:
             if pair_name not in disambig_models:
                 print(f"  Pair {pair_name} not in loaded models, skipping")
@@ -1626,27 +1632,54 @@ class FretListenerGUI:
             string_a, fret_a = midi_info[0]
             string_b, fret_b = midi_info[1]
             
+            # Only run if both strings are still candidates
+            if string_a not in candidates and string_b not in candidates:
+                print(f"  Skipping {pair_name}: neither S{string_a} nor S{string_b} in candidates")
+                continue
+            
             # Run inference
             prob_a, prob_b = self._run_disambiguator(window, dm, fret_a, fret_b)
             print(f"  Disambig {pair_name}: prob_a={prob_a:.3f} (S{string_a} F{fret_a}), prob_b={prob_b:.3f} (S{string_b} F{fret_b})")
             
-            # Pick the option with higher probability
+            # Eliminate the loser from candidates
             if prob_a > prob_b:
-                results[pair_name] = (string_a, fret_a, prob_a)
+                # String A wins, eliminate string B
+                winner_str, loser_str = string_a, string_b
+                winner_prob = prob_a
             else:
-                results[pair_name] = (string_b, fret_b, prob_b)
+                # String B wins, eliminate string A
+                winner_str, loser_str = string_b, string_a
+                winner_prob = prob_b
+            
+            if loser_str in candidates:
+                del candidates[loser_str]
+                print(f"    → S{loser_str} eliminated, remaining: {candidates}")
+            
+            disambig_info.append(f"{pair_name}:S{winner_str}")
         
-        if not results:
-            # No disambiguator succeeded - pick lowest fret
+        # Pick winner from remaining candidates
+        if not candidates:
+            # All eliminated (shouldn't happen) - fall back to lowest fret
             positions.sort(key=lambda x: x[1])
             string_num, fret = positions[0]
-            return string_num_to_idx(string_num), fret, " | Disambig N/A"
+            print(f"  All candidates eliminated, falling back to lowest fret")
+            return string_num_to_idx(string_num), fret, " | Disambig conflict"
         
-        # Use first result (should only be one pair per note typically)
-        pair_name = list(results.keys())[0]
-        string_num, fret, prob = results[pair_name]
+        if len(candidates) == 1:
+            # Perfect - exactly one survivor
+            string_num = list(candidates.keys())[0]
+            fret = candidates[string_num]
+            info = " | " + ", ".join(disambig_info)
+            print(f"  Winner: S{string_num} F{fret}")
+            return string_num_to_idx(string_num), fret, info
         
-        return string_num_to_idx(string_num), fret, f" | {pair_name}: {prob:.2f}"
+        # Multiple candidates remain - pick lowest fret among them
+        remaining = [(sn, f) for sn, f in candidates.items()]
+        remaining.sort(key=lambda x: x[1])
+        string_num, fret = remaining[0]
+        info = " | " + ", ".join(disambig_info) + " (lowest fret tiebreak)"
+        print(f"  Multiple candidates remain {candidates}, picking lowest fret: S{string_num} F{fret}")
+        return string_num_to_idx(string_num), fret, info
 
     def _run_disambiguator(self, window, dm, fret_a, fret_b):
         """Run a single disambiguator model."""

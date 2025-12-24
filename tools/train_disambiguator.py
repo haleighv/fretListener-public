@@ -71,7 +71,7 @@ class DisambiguatorDataset(Dataset):
         hop_length: int = 128,
         n_mels: int = 64,
         f_min: float = 55.0,
-        f_max: float = 3000.0,
+        f_max: float = 8000.0,
         num_frames: int = 32,
         augment: bool = False,
     ):
@@ -113,15 +113,49 @@ class DisambiguatorDataset(Dataset):
     def _augment_audio(self, audio: np.ndarray) -> np.ndarray:
         if not self.augment:
             return audio
+        
+        # Gain variation ±3dB (50% chance)
         if random.random() < 0.5:
             gain_db = (random.random() - 0.5) * 6
             audio = audio * (10 ** (gain_db / 20))
+        
+        # Time shift ±10% (30% chance)
         if random.random() < 0.3:
             shift = random.randint(-len(audio) // 10, len(audio) // 10)
             audio = np.roll(audio, shift)
+        
+        # Add noise (30% chance)
         if random.random() < 0.3:
             audio = audio + np.random.randn(len(audio)).astype(np.float32) * 0.005
+        
+        # Pitch shift ±10 cents (30% chance)
+        if random.random() < 0.3:
+            n_steps = (random.random() - 0.5) * 0.2  # ±0.1 semitones = ±10 cents
+            audio = librosa.effects.pitch_shift(audio, sr=self.sample_rate, n_steps=n_steps)
+            audio = audio.astype(np.float32)
+        
         return audio
+    
+    def _augment_spectrogram(self, spec: torch.Tensor) -> torch.Tensor:
+        """SpecAugment: randomly mask frequency and time bands."""
+        if not self.augment:
+            return spec
+        
+        _, n_mels, n_frames = spec.shape
+        
+        # Frequency masking (30% chance) - mask up to 8 mel bins
+        if random.random() < 0.3:
+            f_mask_width = random.randint(1, min(8, n_mels // 4))
+            f_start = random.randint(0, n_mels - f_mask_width)
+            spec[:, f_start:f_start + f_mask_width, :] = 0
+        
+        # Time masking (30% chance) - mask up to 5 frames
+        if random.random() < 0.3:
+            t_mask_width = random.randint(1, min(5, n_frames // 4))
+            t_start = random.randint(0, n_frames - t_mask_width)
+            spec[:, :, t_start:t_start + t_mask_width] = 0
+        
+        return spec
     
     def _audio_to_mel(self, audio: np.ndarray) -> torch.Tensor:
         peak = np.max(np.abs(audio))
@@ -146,6 +180,8 @@ class DisambiguatorDataset(Dataset):
         if self.augment:
             audio = self._augment_audio(audio)
         mel = self._audio_to_mel(audio)
+        if self.augment:
+            mel = self._augment_spectrogram(mel)
         return {
             'mel': mel,
             'target': torch.tensor(int(row['target']), dtype=torch.long),

@@ -48,7 +48,10 @@ for p in [str(SRC_DIR), str(COMMON_DIR), str(REPO_ROOT)]:
 # Import models
 from note_model import NoteCNN
 from string_model import StringCNN
-from disambiguator_model import DisambiguatorCNN, STRING_OPEN_MIDI, ALL_PAIRS
+from disambiguator_model import (
+    TripletDisambiguatorCNN, DisambiguatorCNN,  # Keep legacy for old checkpoints
+    STRING_OPEN_MIDI, ALL_TRIPLETS, TRIPLET_STRINGS, ALL_PAIRS
+)
 
 # Import common utilities
 from common.audio import (
@@ -1060,45 +1063,50 @@ class FretListenerGUI:
         if disambig_dir and disambig_dir.exists():
             state["disambig_models"] = {}
             state["disambig_mel_transforms"] = {}
+            state["disambig_type"] = None  # Will be 'triplet' or 'pair'
             
-            # Map string pair names to directory names
-            pair_names = ['E_A', 'A_D', 'D_G', 'G_B', 'B_e']
+            # Try loading triplet models first (preferred)
+            triplet_names = ['E_A_D', 'A_D_G', 'D_G_B', 'G_B_e']
+            loaded_triplets = 0
             
-            for pair_name in pair_names:
+            for triplet_name in triplet_names:
                 # Try both batch directory structure and single model structure
-                ckpt_path = disambig_dir / pair_name / "disambig_best.pt"
+                ckpt_path = disambig_dir / triplet_name / "disambig_best.pt"
                 if not ckpt_path.exists():
-                    ckpt_path = disambig_dir / f"disambig_{pair_name.lower()}_best.pt"
+                    ckpt_path = disambig_dir / f"disambig_{triplet_name.lower()}_best.pt"
                 if not ckpt_path.exists():
                     continue
                 
                 try:
                     ckpt = torch.load(ckpt_path, map_location='cpu')
-                    disambig_mel_params = ckpt.get("mel_params", {})
                     
-                    # Use disambiguator's own sample rate, not note model's
-                    disambig_sample_rate = ckpt.get("sample_rate", 16000)
-                    disambig_n_mels = disambig_mel_params.get("n_mels", 64)
-                    disambig_hop_length = disambig_mel_params.get("hop_length", 128)
+                    # Check if this is a triplet model
+                    is_triplet = (
+                        ckpt.get("model_params", {}).get("model_class") == "TripletDisambiguatorCNN" or
+                        ckpt.get("model_type") == "triplet" or
+                        ckpt.get("triplet") is not None  # Legacy check
+                    )
+                    if not is_triplet:
+                        continue
+                    
+                    disambig_mel_params = ckpt.get("mel_params", {})
+                    disambig_sample_rate = ckpt.get("sample_rate", 48000)  # New default
+                    disambig_n_mels = disambig_mel_params.get("n_mels", 48)  # Match note model
+                    disambig_hop_length = disambig_mel_params.get("hop_length", 256)  # Match note model
                     disambig_num_frames = disambig_mel_params.get("num_frames", 32)
                     disambig_n_fft = disambig_mel_params.get("n_fft", 1024)
                     disambig_f_min = disambig_mel_params.get("f_min", 55.0)
-                    disambig_f_max = disambig_mel_params.get("f_max", 3000.0)
+                    disambig_f_max = disambig_mel_params.get("f_max", 3000.0)  # Match note model
                     
-                    print(f"  Loading {pair_name}: sr={disambig_sample_rate}, n_mels={disambig_n_mels}, frames={disambig_num_frames}")
+                    print(f"  Loading triplet {triplet_name}: sr={disambig_sample_rate}, n_mels={disambig_n_mels}, frames={disambig_num_frames}")
                     
-                    model = DisambiguatorCNN(n_mels=disambig_n_mels, num_frets=13)
-                    # Initialize with dummy forward pass
-                    dummy = torch.zeros(1, 1, disambig_n_mels, disambig_num_frames)
-                    dummy_fret = torch.zeros(1, dtype=torch.long)
-                    with torch.no_grad():
-                        model(dummy, dummy_fret, dummy_fret)
+                    model = TripletDisambiguatorCNN(n_mels=disambig_n_mels)
                     model.load_state_dict(ckpt["model_state"])
                     model = model.to(device)
                     model.eval()
                     
                     mel_spec, db_transform = create_mel_transforms(
-                        sample_rate=disambig_sample_rate,  # Use disambiguator's sample rate!
+                        sample_rate=disambig_sample_rate,
                         n_fft=disambig_n_fft,
                         hop_length=disambig_hop_length,
                         n_mels=disambig_n_mels,
@@ -1106,17 +1114,83 @@ class FretListenerGUI:
                         f_max=disambig_f_max,
                     )
                     
-                    state["disambig_models"][pair_name] = {
+                    state["disambig_models"][triplet_name] = {
                         "model": model,
                         "mel_spec": mel_spec,
                         "db_transform": db_transform,
                         "n_mels": disambig_n_mels,
                         "hop_length": disambig_hop_length,
                         "num_frames": disambig_num_frames,
-                        "sample_rate": disambig_sample_rate,  # Store for resampling
+                        "sample_rate": disambig_sample_rate,
+                        "strings": ckpt.get("strings", TRIPLET_STRINGS[triplet_name]),
                     }
+                    loaded_triplets += 1
                 except Exception as e:
-                    print(f"Warning: Failed to load disambiguator {pair_name}: {e}")
+                    print(f"Warning: Failed to load triplet disambiguator {triplet_name}: {e}")
+            
+            if loaded_triplets > 0:
+                state["disambig_type"] = "triplet"
+                print(f"  Loaded {loaded_triplets} triplet disambiguators")
+            else:
+                # Fall back to legacy pair models
+                pair_names = ['E_A', 'A_D', 'D_G', 'G_B', 'B_e']
+                loaded_pairs = 0
+                
+                for pair_name in pair_names:
+                    ckpt_path = disambig_dir / pair_name / "disambig_best.pt"
+                    if not ckpt_path.exists():
+                        ckpt_path = disambig_dir / f"disambig_{pair_name.lower()}_best.pt"
+                    if not ckpt_path.exists():
+                        continue
+                    
+                    try:
+                        ckpt = torch.load(ckpt_path, map_location='cpu')
+                        disambig_mel_params = ckpt.get("mel_params", {})
+                        
+                        disambig_sample_rate = ckpt.get("sample_rate", 48000)  # New default
+                        disambig_n_mels = disambig_mel_params.get("n_mels", 48)  # Match note model
+                        disambig_hop_length = disambig_mel_params.get("hop_length", 256)  # Match note model
+                        disambig_num_frames = disambig_mel_params.get("num_frames", 32)
+                        disambig_n_fft = disambig_mel_params.get("n_fft", 1024)
+                        disambig_f_min = disambig_mel_params.get("f_min", 55.0)
+                        disambig_f_max = disambig_mel_params.get("f_max", 3000.0)  # Match note model
+                        
+                        print(f"  Loading legacy pair {pair_name}: sr={disambig_sample_rate}")
+                        
+                        model = DisambiguatorCNN(n_mels=disambig_n_mels, num_frets=13)
+                        dummy = torch.zeros(1, 1, disambig_n_mels, disambig_num_frames)
+                        dummy_fret = torch.zeros(1, dtype=torch.long)
+                        with torch.no_grad():
+                            model(dummy, dummy_fret, dummy_fret)
+                        model.load_state_dict(ckpt["model_state"])
+                        model = model.to(device)
+                        model.eval()
+                        
+                        mel_spec, db_transform = create_mel_transforms(
+                            sample_rate=disambig_sample_rate,
+                            n_fft=disambig_n_fft,
+                            hop_length=disambig_hop_length,
+                            n_mels=disambig_n_mels,
+                            f_min=disambig_f_min,
+                            f_max=disambig_f_max,
+                        )
+                        
+                        state["disambig_models"][pair_name] = {
+                            "model": model,
+                            "mel_spec": mel_spec,
+                            "db_transform": db_transform,
+                            "n_mels": disambig_n_mels,
+                            "hop_length": disambig_hop_length,
+                            "num_frames": disambig_num_frames,
+                            "sample_rate": disambig_sample_rate,
+                        }
+                        loaded_pairs += 1
+                    except Exception as e:
+                        print(f"Warning: Failed to load pair disambiguator {pair_name}: {e}")
+                
+                if loaded_pairs > 0:
+                    state["disambig_type"] = "pair"
+                    print(f"  Loaded {loaded_pairs} legacy pair disambiguators")
         
         return state
 
@@ -1555,8 +1629,8 @@ class FretListenerGUI:
     def _disambiguate_note(self, midi, window):
         """Use disambiguator models to determine string/fret position.
         
-        Uses Smart Chain approach: each disambiguator eliminates one candidate
-        from the set of possible positions. The survivor is the answer.
+        For triplet models: Direct 3-way classification
+        For legacy pair models: Smart Chain approach with eliminations
         
         Returns: (string_idx, fret, info_string)
         
@@ -1572,7 +1646,6 @@ class FretListenerGUI:
             if 0 <= fret <= 12:
                 positions.append((string_num, fret))
         
-        print(f"  STRING_OPEN_MIDI = {STRING_OPEN_MIDI}")
         print(f"  positions = {positions}")
         
         if not positions:
@@ -1581,45 +1654,88 @@ class FretListenerGUI:
         
         # Convert string_num (1=high E, 6=low E) to string_idx (0=low E, 5=high E)
         def string_num_to_idx(sn):
-            result = 6 - sn  # string_num 6 -> idx 0, string_num 1 -> idx 5
-            print(f"  string_num_to_idx({sn}) = {result}")
-            return result
+            return 6 - sn
         
         if len(positions) == 1:
             # Unambiguous - only one position
             string_num, fret = positions[0]
-            string_idx = string_num_to_idx(string_num)
-            print(f"  Unambiguous: string_num={string_num}, fret={fret}, string_idx={string_idx}")
-            return string_idx, fret, " | Unambiguous"
+            print(f"  Unambiguous: S{string_num} F{fret}")
+            return string_num_to_idx(string_num), fret, " | Unambiguous"
         
-        # Check which disambiguators we have and which are relevant
+        # Check disambiguator type
         disambig_models = self.state.get("disambig_models", {})
-        print(f"  Loaded disambiguators: {list(disambig_models.keys())}")
+        disambig_type = self.state.get("disambig_type")
+        print(f"  Disambig type: {disambig_type}, models: {list(disambig_models.keys())}")
+        
+        if disambig_type == "triplet":
+            return self._disambiguate_triplet(midi, window, positions, string_num_to_idx)
+        elif disambig_type == "pair":
+            return self._disambiguate_pair_chain(midi, window, positions, string_num_to_idx)
+        else:
+            # No disambiguators loaded - use lowest fret
+            positions.sort(key=lambda x: x[1])
+            string_num, fret = positions[0]
+            print(f"  No disambiguators, picking lowest fret: S{string_num} F{fret}")
+            return string_num_to_idx(string_num), fret, " | No disambig"
+    
+    def _disambiguate_triplet(self, midi, window, positions, string_num_to_idx):
+        """Use triplet model for 3-way disambiguation."""
+        disambig_models = self.state.get("disambig_models", {})
+        
+        # Find relevant triplet
+        relevant_triplet = None
+        for triplet_name, triplet_info in ALL_TRIPLETS.items():
+            if midi in triplet_info:
+                if triplet_name in disambig_models:
+                    relevant_triplet = triplet_name
+                    break
+        
+        if not relevant_triplet:
+            # No relevant triplet model - fall back to lowest fret
+            positions.sort(key=lambda x: x[1])
+            string_num, fret = positions[0]
+            print(f"  No relevant triplet, picking lowest fret: S{string_num} F{fret}")
+            return string_num_to_idx(string_num), fret, " | No triplet"
+        
+        dm = disambig_models[relevant_triplet]
+        triplet_info = ALL_TRIPLETS[relevant_triplet]
+        midi_positions = triplet_info[midi]  # [(s_a, f_a), (s_b, f_b), (s_c, f_c)]
+        
+        # Run triplet model
+        probs = self._run_triplet_disambiguator(window, dm)
+        print(f"  Triplet {relevant_triplet}: probs={probs}")
+        
+        # Get winner
+        winner_idx = probs.index(max(probs))
+        string_num, fret = midi_positions[winner_idx]
+        confidence = probs[winner_idx]
+        
+        print(f"  Winner: S{string_num} F{fret} (conf={confidence:.3f})")
+        return string_num_to_idx(string_num), fret, f" | {relevant_triplet}: {confidence:.2f}"
+    
+    def _disambiguate_pair_chain(self, midi, window, positions, string_num_to_idx):
+        """Use legacy pair models with Smart Chain elimination."""
+        disambig_models = self.state.get("disambig_models", {})
         
         # Build candidate set: {string_num: fret}
         candidates = {pos[0]: pos[1] for pos in positions}
         print(f"  Initial candidates: {candidates}")
         
-        # Find which string pair(s) this note belongs to
+        # Find relevant pairs
         relevant_pairs = []
         for pair_name, pair_info in ALL_PAIRS.items():
             if midi in pair_info:
                 relevant_pairs.append(pair_name)
         
-        print(f"  Relevant pairs for MIDI {midi}: {relevant_pairs}")
-        
         if not relevant_pairs:
-            # No relevant disambiguator - pick lowest fret position
             positions.sort(key=lambda x: x[1])
             string_num, fret = positions[0]
-            print(f"  No relevant pairs, picking lowest fret: string_num={string_num}, fret={fret}")
-            return string_num_to_idx(string_num), fret, " | No disambig"
+            return string_num_to_idx(string_num), fret, " | No pairs"
         
-        # Smart Chain: Run disambiguators and eliminate losers
+        # Run disambiguators and eliminate losers
         disambig_info = []
         for pair_name in relevant_pairs:
             if pair_name not in disambig_models:
-                print(f"  Pair {pair_name} not in loaded models, skipping")
                 continue
             
             dm = disambig_models[pair_name]
@@ -1633,23 +1749,18 @@ class FretListenerGUI:
             string_b, fret_b = midi_info[1]
             
             # Only run if BOTH strings are still candidates
-            # if string_a not in candidates or string_b not in candidates:
-            #     print(f"  Skipping {pair_name}: S{string_a} or S{string_b} already eliminated")
-            #     continue
+            if string_a not in candidates or string_b not in candidates:
+                continue
             
             # Run inference
-            prob_a, prob_b = self._run_disambiguator(window, dm, fret_a, fret_b)
-            print(f"  Disambig {pair_name}: prob_a={prob_a:.3f} (S{string_a} F{fret_a}), prob_b={prob_b:.3f} (S{string_b} F{fret_b})")
+            prob_a, prob_b = self._run_pair_disambiguator(window, dm, fret_a, fret_b)
+            print(f"  Pair {pair_name}: prob_a={prob_a:.3f} (S{string_a}), prob_b={prob_b:.3f} (S{string_b})")
             
-            # Eliminate the loser from candidates
+            # Eliminate the loser
             if prob_a > prob_b:
-                # String A wins, eliminate string B
                 winner_str, loser_str = string_a, string_b
-                winner_prob = prob_a
             else:
-                # String B wins, eliminate string A
                 winner_str, loser_str = string_b, string_a
-                winner_prob = prob_b
             
             if loser_str in candidates:
                 del candidates[loser_str]
@@ -1659,30 +1770,25 @@ class FretListenerGUI:
         
         # Pick winner from remaining candidates
         if not candidates:
-            # All eliminated (shouldn't happen) - fall back to lowest fret
             positions.sort(key=lambda x: x[1])
             string_num, fret = positions[0]
-            print(f"  All candidates eliminated, falling back to lowest fret")
-            return string_num_to_idx(string_num), fret, " | Disambig conflict"
+            return string_num_to_idx(string_num), fret, " | Conflict"
         
         if len(candidates) == 1:
-            # Perfect - exactly one survivor
             string_num = list(candidates.keys())[0]
             fret = candidates[string_num]
             info = " | " + ", ".join(disambig_info)
-            print(f"  Winner: S{string_num} F{fret}")
             return string_num_to_idx(string_num), fret, info
         
-        # Multiple candidates remain - pick lowest fret among them
+        # Multiple remain - pick lowest fret
         remaining = [(sn, f) for sn, f in candidates.items()]
         remaining.sort(key=lambda x: x[1])
         string_num, fret = remaining[0]
-        info = " | " + ", ".join(disambig_info) + " (lowest fret tiebreak)"
-        print(f"  Multiple candidates remain {candidates}, picking lowest fret: S{string_num} F{fret}")
+        info = " | " + ", ".join(disambig_info) + " (tiebreak)"
         return string_num_to_idx(string_num), fret, info
-
-    def _run_disambiguator(self, window, dm, fret_a, fret_b):
-        """Run a single disambiguator model."""
+    
+    def _run_triplet_disambiguator(self, window, dm):
+        """Run triplet disambiguator model. Returns [prob_a, prob_b, prob_c]."""
         import torch.nn.functional as F
         import librosa
         
@@ -1694,17 +1800,38 @@ class FretListenerGUI:
         disambig_sr = dm.get("sample_rate", 16000)
         capture_sr = self.state["sample_rate"]
         
-        # Peak normalize before inference (matches training)
         w = peak_normalize(window)
         
-        # Resample if needed (capture is at 48kHz, disambiguator trained at 16kHz)
         if capture_sr != disambig_sr:
             w = librosa.resample(w, orig_sr=capture_sr, target_sr=disambig_sr)
         
-        # Preprocess using common module
-        spec = waveform_to_logmel_torch(
-            w, mel_spec, db_transform, num_frames, device
-        )
+        spec = waveform_to_logmel_torch(w, mel_spec, db_transform, num_frames, device)
+        
+        with torch.no_grad():
+            logits = model(spec)
+            probs = F.softmax(logits, dim=1)
+        
+        return [probs[0, i].item() for i in range(3)]
+    
+    def _run_pair_disambiguator(self, window, dm, fret_a, fret_b):
+        """Run legacy pair disambiguator model. Returns (prob_a, prob_b)."""
+        import torch.nn.functional as F
+        import librosa
+        
+        device = self.state["device"]
+        model = dm["model"]
+        mel_spec = dm["mel_spec"]
+        db_transform = dm["db_transform"]
+        num_frames = dm["num_frames"]
+        disambig_sr = dm.get("sample_rate", 16000)
+        capture_sr = self.state["sample_rate"]
+        
+        w = peak_normalize(window)
+        
+        if capture_sr != disambig_sr:
+            w = librosa.resample(w, orig_sr=capture_sr, target_sr=disambig_sr)
+        
+        spec = waveform_to_logmel_torch(w, mel_spec, db_transform, num_frames, device)
         
         fret_a_t = torch.tensor([fret_a], dtype=torch.long).to(device)
         fret_b_t = torch.tensor([fret_b], dtype=torch.long).to(device)

@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
 """
-build_disambig_mix.py - Build training mix for string disambiguation models.
+build_disambig_mix.py - Build training mixes for string disambiguation models.
 
-Creates training CSVs for disambiguating between two adjacent strings.
-Only includes samples for notes that are ambiguous between the two strings.
+Supports two modes:
+- Triplet (3-way): Disambiguate between 3 adjacent strings (recommended)
+- Pair (2-way): Disambiguate between 2 adjacent strings (legacy)
 
 Usage:
-    # Build single pair mix
-    python build_disambig_mix.py \\
-        --pair A_D \\
-        --datasets data/strat_neck_119 data/rg550_neck_20 \\
-        --output recipes/disambig_a_d_mix.csv
+    # Build ALL triplets (recommended)
+    python build_disambig_mix.py --all-triplets --output-dir recipes/disambig/ --datasets data/...
 
-    # Build ALL pairs at once (batch mode)
-    python build_disambig_mix.py \\
-        --all-pairs \\
-        --datasets data/strat_neck_119 data/rg550_neck_20 \\
-        --output-dir recipes/disambig/
-        
-    # List available datasets
-    python build_disambig_mix.py --list-datasets
+    # Build ALL pairs (legacy)
+    python build_disambig_mix.py --all-pairs --output-dir recipes/disambig/ --datasets data/...
 """
 
 import argparse
@@ -28,454 +20,304 @@ import random
 import sys
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
-# Add parent directory to path for common imports
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from common.dataset import load_datasets, get_group_key
+from common.dataset import load_datasets
 
+# String definitions
+OPEN_MIDI = {1: 64, 2: 59, 3: 55, 4: 50, 5: 45, 6: 40}
 
-# =============================================================================
-# STRING PAIR DEFINITIONS
-# =============================================================================
+STRING_TRIPLETS = {
+    'E_A_D': (6, 5, 4),
+    'A_D_G': (5, 4, 3),
+    'D_G_B': (4, 3, 2),
+    'G_B_e': (3, 2, 1),
+}
 
-# String pair definitions: name -> (string_num_a, string_num_b)
-# String numbers are 1-indexed: 1=high e, 6=low E
 STRING_PAIRS = {
-    'E_A': (6, 5),  # low E vs A
-    'A_D': (5, 4),  # A vs D
-    'D_G': (4, 3),  # D vs G
-    'G_B': (3, 2),  # G vs B
-    'B_e': (2, 1),  # B vs high e
+    'E_A': (6, 5),
+    'A_D': (5, 4),
+    'D_G': (4, 3),
+    'G_B': (3, 2),
+    'B_e': (2, 1),
 }
 
 
-# =============================================================================
-# AMBIGUITY DETECTION
-# =============================================================================
-
-def get_ambiguous_midi_notes(string_a: int, string_b: int, max_fret: int = 12) -> Dict[int, Dict]:
-    """
-    Get MIDI notes that are ambiguous between two strings.
-    
-    Returns dict: midi -> {
-        'fret_a': int,
-        'fret_b': int,
-    }
-    """
-    # Import here to avoid circular dependency
-    open_midi = {
-        1: 64,  # high e
-        2: 59,  # B
-        3: 55,  # G
-        4: 50,  # D
-        5: 45,  # A
-        6: 40,  # low E
-    }
-    
-    open_a = open_midi[string_a]
-    open_b = open_midi[string_b]
-    
-    # MIDI range for each string (within max_fret)
-    range_a = set(range(open_a, open_a + max_fret + 1))
-    range_b = set(range(open_b, open_b + max_fret + 1))
-    
-    # Ambiguous = notes playable on both strings
-    ambiguous = range_a & range_b
-    
-    result = {}
-    for midi in sorted(ambiguous):
-        fret_a = midi - open_a
-        fret_b = midi - open_b
-        result[midi] = {
-            'fret_a': fret_a,
-            'fret_b': fret_b,
-        }
-    
-    return result
-
-
 def midi_to_note_name(midi: int) -> str:
-    """Convert MIDI note number to note name."""
     names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
     return names[midi % 12] + str(midi // 12 - 1)
 
 
-# =============================================================================
-# DATASET DISCOVERY
-# =============================================================================
+def get_triplet_ambiguities(s_a: int, s_b: int, s_c: int, max_fret: int = 12) -> Dict:
+    """Get MIDI notes playable on all 3 strings."""
+    range_a = set(range(OPEN_MIDI[s_a], OPEN_MIDI[s_a] + max_fret + 1))
+    range_b = set(range(OPEN_MIDI[s_b], OPEN_MIDI[s_b] + max_fret + 1))
+    range_c = set(range(OPEN_MIDI[s_c], OPEN_MIDI[s_c] + max_fret + 1))
+    ambiguous = range_a & range_b & range_c
+    return {midi: {'fret_a': midi - OPEN_MIDI[s_a], 'fret_b': midi - OPEN_MIDI[s_b], 
+                   'fret_c': midi - OPEN_MIDI[s_c]} for midi in sorted(ambiguous)}
+
+
+def get_pair_ambiguities(s_a: int, s_b: int, max_fret: int = 12) -> Dict:
+    """Get MIDI notes playable on both strings."""
+    range_a = set(range(OPEN_MIDI[s_a], OPEN_MIDI[s_a] + max_fret + 1))
+    range_b = set(range(OPEN_MIDI[s_b], OPEN_MIDI[s_b] + max_fret + 1))
+    ambiguous = range_a & range_b
+    return {midi: {'fret_a': midi - OPEN_MIDI[s_a], 'fret_b': midi - OPEN_MIDI[s_b]} 
+            for midi in sorted(ambiguous)}
+
 
 def find_datasets(data_dir: Path) -> List[Path]:
-    """Find all dataset directories under data_dir."""
     datasets = []
     if not data_dir.exists():
         return datasets
-    
     for item in sorted(data_dir.iterdir()):
         if item.is_dir() and not item.name.startswith('.'):
-            # Check if it has a metadata CSV
-            meta_csv = item / "metadata.csv"
-            if meta_csv.exists():
+            if (item / "metadata.csv").exists():
                 datasets.append(item)
-    
     return datasets
 
 
 def list_datasets(data_dir: Path) -> None:
-    """List available datasets with sample counts."""
     datasets = find_datasets(data_dir)
-    
     if not datasets:
         print(f"No datasets found in {data_dir}")
         return
-    
     print(f"Available datasets in {data_dir}:\n")
-    
     for ds in datasets:
-        meta_csv = ds / "metadata.csv"
         try:
-            with open(meta_csv, 'r') as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
-                
-            # Count by string
+            with open(ds / "metadata.csv", 'r') as f:
+                rows = list(csv.DictReader(f))
             string_counts = defaultdict(int)
             for row in rows:
                 try:
                     string_counts[int(row['string'])] += 1
                 except:
                     pass
-            
             string_str = ", ".join([f"S{s}:{c}" for s, c in sorted(string_counts.items())])
             print(f"  {ds.name}: {len(rows)} samples ({string_str})")
-            
         except Exception as e:
-            print(f"  {ds.name}: Error reading metadata - {e}")
-    
+            print(f"  {ds.name}: Error - {e}")
     print(f"\nTotal: {len(datasets)} datasets")
 
 
-# =============================================================================
-# MIX BUILDING
-# =============================================================================
-
-def build_disambig_mix(
-    dataset_roots: List[Path],
-    string_a: int,
-    string_b: int,
-    output_csv: Path,
-    max_fret: int = 12,
-    val_split: float = 0.15,
-    seed: int = 42,
-) -> Dict:
-    """
-    Build disambiguation training mix from dataset directories.
-    
-    Args:
-        dataset_roots: List of dataset root paths
-        string_a: First string number (1-indexed)
-        string_b: Second string number (1-indexed)
-        output_csv: Output path for disambiguation mix
-        max_fret: Maximum fret to include
-        val_split: Fraction for validation
-        seed: Random seed
-    
-    Returns:
-        Stats dict
-    """
+def build_triplet_mix(dataset_roots, string_a, string_b, string_c, output_csv, 
+                      max_fret=12, val_split=0.15, seed=42):
+    """Build 3-way disambiguation mix."""
     random.seed(seed)
+    ambiguous = get_triplet_ambiguities(string_a, string_b, string_c, max_fret)
     
-    # Get ambiguous MIDI notes for this pair
-    ambiguous = get_ambiguous_midi_notes(string_a, string_b, max_fret)
+    print(f"Triplet: S{string_a} vs S{string_b} vs S{string_c}")
+    print(f"Ambiguous MIDI notes: {list(ambiguous.keys())}")
     
-    print(f"String pair: S{string_a} vs S{string_b}")
-    print(f"Ambiguous MIDI notes: {sorted(ambiguous.keys())}")
-    for midi, info in sorted(ambiguous.items()):
-        name = midi_to_note_name(midi)
-        print(f"  MIDI {midi} ({name}): S{string_a}F{info['fret_a']} vs S{string_b}F{info['fret_b']}")
-    
-    # Load datasets using common module
-    print(f"\nLoading datasets...")
     all_rows = load_datasets(dataset_roots, require_string=True)
-    
     if not all_rows:
-        raise SystemExit("No valid samples loaded.")
-    
+        raise SystemExit("No samples loaded")
     print(f"Loaded {len(all_rows)} total samples")
     
-    # Filter to ambiguous MIDI notes on our target strings
-    rows_by_midi_string = defaultdict(list)
-    
+    # Group by (midi, string)
+    rows_by_ms = defaultdict(list)
     for row in all_rows:
         try:
-            midi = int(row.get('midi', 0))
-            string = int(row.get('string', 0))
-        except (ValueError, TypeError):
+            midi, string = int(row.get('midi', 0)), int(row.get('string', 0))
+        except:
             continue
-        
-        # Only keep rows for ambiguous MIDI notes on our target strings
-        if midi in ambiguous and string in (string_a, string_b):
-            rows_by_midi_string[(midi, string)].append(row)
+        if midi in ambiguous and string in (string_a, string_b, string_c):
+            rows_by_ms[(midi, string)].append(row)
     
-    # Balance: for each ambiguous MIDI, take equal samples from each string
-    # Also balance across MIDIs so notes with fewer samples don't get overwhelmed
-    midi_sample_counts = {}
-    
+    # Balance across all 3 strings per MIDI
+    balanced = []
     for midi in sorted(ambiguous.keys()):
-        rows_a = rows_by_midi_string.get((midi, string_a), [])
-        rows_b = rows_by_midi_string.get((midi, string_b), [])
-        
-        # Take minimum of the two to balance strings
-        n = min(len(rows_a), len(rows_b))
-        if n > 0:
-            midi_sample_counts[midi] = {
-                'rows_a': rows_a,
-                'rows_b': rows_b,
-                'available': n,
-            }
-        else:
-            print(f"  WARNING: No samples for MIDI {midi} on one or both strings!")
+        rows_a = rows_by_ms.get((midi, string_a), [])
+        rows_b = rows_by_ms.get((midi, string_b), [])
+        rows_c = rows_by_ms.get((midi, string_c), [])
+        n = min(len(rows_a), len(rows_b), len(rows_c))
+        if n == 0:
+            print(f"  WARNING: MIDI {midi} missing samples on some strings")
+            continue
+        random.shuffle(rows_a); random.shuffle(rows_b); random.shuffle(rows_c)
+        balanced.extend(rows_a[:n] + rows_b[:n] + rows_c[:n])
+        print(f"  MIDI {midi}: {n} per string (avail: {len(rows_a)}/{len(rows_b)}/{len(rows_c)})")
     
-    if not midi_sample_counts:
-        raise SystemExit("No samples found for this string pair!")
+    if not balanced:
+        raise SystemExit("No balanced samples")
     
-    # Find minimum samples across all MIDIs for cross-MIDI balancing
-    min_samples = min(info['available'] for info in midi_sample_counts.values())
-    print(f"\n  Cross-MIDI balancing: using {min_samples} samples per MIDI note")
+    random.shuffle(balanced)
+    n_val = int(len(balanced) * val_split)
     
-    balanced_rows = []
-    stats = {
-        'midi_counts': {},
-        'string_a_total': 0,
-        'string_b_total': 0,
-    }
-    
-    for midi in sorted(midi_sample_counts.keys()):
-        info = midi_sample_counts[midi]
-        rows_a = info['rows_a']
-        rows_b = info['rows_b']
-        
-        # Shuffle before selecting
-        random.shuffle(rows_a)
-        random.shuffle(rows_b)
-        
-        # Use min_samples for cross-MIDI balance
-        n = min_samples
-        
-        # Add to output
-        selected_a = rows_a[:n]
-        selected_b = rows_b[:n]
-        
-        balanced_rows.extend(selected_a)
-        balanced_rows.extend(selected_b)
-        
-        stats['midi_counts'][midi] = {
-            'available_a': len(rows_a),
-            'available_b': len(rows_b),
-            'used': n,
-        }
-        stats['string_a_total'] += n
-        stats['string_b_total'] += n
-        
-        print(f"  MIDI {midi}: {n} samples per string (available: {len(rows_a)}/{len(rows_b)})")
-    
-    if not balanced_rows:
-        raise SystemExit("No samples found for this string pair!")
-    
-    # Shuffle and split train/val
-    random.shuffle(balanced_rows)
-    
-    n_val = int(len(balanced_rows) * val_split)
-    n_train = len(balanced_rows) - n_val
-    
-    # Assign splits
-    for i, row in enumerate(balanced_rows):
+    for i, row in enumerate(balanced):
         row['split'] = 'val' if i < n_val else 'train'
-    
-    # Add disambiguation-specific columns
-    for row in balanced_rows:
-        midi = int(row['midi'])
-        string = int(row['string'])
+        midi, string = int(row['midi']), int(row['string'])
         info = ambiguous[midi]
-        
-        # Target: 0 = string_a, 1 = string_b
-        row['target'] = 0 if string == string_a else 1
-        row['fret_a'] = info['fret_a']
-        row['fret_b'] = info['fret_b']
-        row['string_a'] = string_a
-        row['string_b'] = string_b
+        row['target'] = 0 if string == string_a else (1 if string == string_b else 2)
+        row['fret_a'], row['fret_b'], row['fret_c'] = info['fret_a'], info['fret_b'], info['fret_c']
+        row['string_a'], row['string_b'], row['string_c'] = string_a, string_b, string_c
     
-    # Write output
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    
-    fieldnames = [
-        'abs_path', 'dataset_root', 'filename', 'string', 'fret', 'midi', 'note',
-        'take', 'sample_rate', 'split', 'target', 'fret_a', 'fret_b', 'string_a', 'string_b'
-    ]
-    
-    print(f"\nWriting {output_csv}...")
+    fieldnames = ['abs_path', 'dataset_root', 'filename', 'string', 'fret', 'midi', 'note',
+                  'take', 'sample_rate', 'split', 'target', 'fret_a', 'fret_b', 'fret_c',
+                  'string_a', 'string_b', 'string_c']
     with open(output_csv, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
-        writer.writerows(balanced_rows)
+        writer.writerows(balanced)
     
-    # Summary
-    stats['total'] = len(balanced_rows)
-    stats['train'] = n_train
-    stats['val'] = n_val
+    print(f"\nWrote {len(balanced)} samples ({len(balanced)-n_val} train, {n_val} val)")
+    return {'total': len(balanced), 'train': len(balanced)-n_val, 'val': n_val}
+
+
+def build_pair_mix(dataset_roots, string_a, string_b, output_csv, 
+                   max_fret=12, val_split=0.15, seed=42):
+    """Build 2-way disambiguation mix."""
+    random.seed(seed)
+    ambiguous = get_pair_ambiguities(string_a, string_b, max_fret)
     
-    print(f"\nSummary:")
-    print(f"  Total samples: {stats['total']}")
-    print(f"  Train: {stats['train']}")
-    print(f"  Val: {stats['val']}")
-    print(f"  String {string_a} samples: {stats['string_a_total']}")
-    print(f"  String {string_b} samples: {stats['string_b_total']}")
+    print(f"Pair: S{string_a} vs S{string_b}")
+    print(f"Ambiguous MIDI notes: {list(ambiguous.keys())}")
     
-    return stats
+    all_rows = load_datasets(dataset_roots, require_string=True)
+    if not all_rows:
+        raise SystemExit("No samples loaded")
+    print(f"Loaded {len(all_rows)} total samples")
+    
+    rows_by_ms = defaultdict(list)
+    for row in all_rows:
+        try:
+            midi, string = int(row.get('midi', 0)), int(row.get('string', 0))
+        except:
+            continue
+        if midi in ambiguous and string in (string_a, string_b):
+            rows_by_ms[(midi, string)].append(row)
+    
+    balanced = []
+    for midi in sorted(ambiguous.keys()):
+        rows_a = rows_by_ms.get((midi, string_a), [])
+        rows_b = rows_by_ms.get((midi, string_b), [])
+        n = min(len(rows_a), len(rows_b))
+        if n == 0:
+            print(f"  WARNING: MIDI {midi} missing samples")
+            continue
+        random.shuffle(rows_a); random.shuffle(rows_b)
+        balanced.extend(rows_a[:n] + rows_b[:n])
+        print(f"  MIDI {midi}: {n} per string (avail: {len(rows_a)}/{len(rows_b)})")
+    
+    if not balanced:
+        raise SystemExit("No balanced samples")
+    
+    random.shuffle(balanced)
+    n_val = int(len(balanced) * val_split)
+    
+    for i, row in enumerate(balanced):
+        row['split'] = 'val' if i < n_val else 'train'
+        midi, string = int(row['midi']), int(row['string'])
+        info = ambiguous[midi]
+        row['target'] = 0 if string == string_a else 1
+        row['fret_a'], row['fret_b'] = info['fret_a'], info['fret_b']
+        row['string_a'], row['string_b'] = string_a, string_b
+    
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ['abs_path', 'dataset_root', 'filename', 'string', 'fret', 'midi', 'note',
+                  'take', 'sample_rate', 'split', 'target', 'fret_a', 'fret_b', 'string_a', 'string_b']
+    with open(output_csv, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(balanced)
+    
+    print(f"\nWrote {len(balanced)} samples ({len(balanced)-n_val} train, {n_val} val)")
+    return {'total': len(balanced), 'train': len(balanced)-n_val, 'val': n_val}
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Build disambiguation training mix",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-String pairs:
-  E_A  - Low E (string 6) vs A (string 5)
-  A_D  - A (string 5) vs D (string 4)
-  D_G  - D (string 4) vs G (string 3)
-  G_B  - G (string 3) vs B (string 2)
-  B_e  - B (string 2) vs high e (string 1)
-
-Examples:
-  # List available datasets
-  python build_disambig_mix.py --list-datasets
-  
-  # Build single pair mix
-  python build_disambig_mix.py --pair A_D \\
-      --datasets data/strat_neck_119 data/rg550_neck_20 \\
-      --output recipes/disambig_a_d_mix.csv
-      
-  # Build ALL pairs at once
-  python build_disambig_mix.py --all-pairs \\
-      --datasets data/strat_neck_119 data/rg550_neck_20 \\
-      --output-dir recipes/disambig/
-"""
-    )
+    parser = argparse.ArgumentParser(description="Build disambiguation training mixes")
+    parser.add_argument('--list-datasets', action='store_true')
     
-    parser.add_argument('--list-datasets', action='store_true',
-                       help='List available datasets and exit')
-    parser.add_argument('--pair', type=str, choices=list(STRING_PAIRS.keys()),
-                       help='String pair to build mix for (single pair mode)')
-    parser.add_argument('--all-pairs', action='store_true',
-                       help='Build mixes for ALL string pairs (batch mode)')
-    parser.add_argument('--datasets', type=str, nargs='+',
-                       help='Dataset directories to include')
-    parser.add_argument('--output', type=str,
-                       help='Output CSV path (single pair mode)')
-    parser.add_argument('--output-dir', type=str,
-                       help='Output directory for CSVs (batch mode with --all-pairs)')
-    parser.add_argument('--max-fret', type=int, default=12,
-                       help='Maximum fret to include (default: 12)')
-    parser.add_argument('--val-split', type=float, default=0.15,
-                       help='Validation split fraction (default: 0.15)')
-    parser.add_argument('--seed', type=int, default=42,
-                       help='Random seed (default: 42)')
+    # Triplet mode
+    parser.add_argument('--triplet', choices=list(STRING_TRIPLETS.keys()))
+    parser.add_argument('--all-triplets', action='store_true')
+    
+    # Pair mode
+    parser.add_argument('--pair', choices=list(STRING_PAIRS.keys()))
+    parser.add_argument('--all-pairs', action='store_true')
+    
+    parser.add_argument('--datasets', nargs='+')
+    parser.add_argument('--output', type=str)
+    parser.add_argument('--output-dir', type=str)
+    parser.add_argument('--max-fret', type=int, default=12)
+    parser.add_argument('--val-split', type=float, default=0.15)
+    parser.add_argument('--seed', type=int, default=42)
     
     args = parser.parse_args()
     
-    # Find data directory
-    data_dir = REPO_ROOT / "data"
-    
     if args.list_datasets:
-        list_datasets(data_dir)
+        list_datasets(REPO_ROOT / "data")
         return
     
-    # Validate datasets arg
     if not args.datasets:
         parser.error("--datasets is required")
     
-    # Resolve dataset paths
     dataset_roots = []
     for ds in args.datasets:
-        ds_path = Path(ds)
-        if not ds_path.is_absolute():
-            ds_path = REPO_ROOT / ds
-        if not ds_path.exists():
-            print(f"WARNING: Dataset not found: {ds_path}")
-            continue
-        dataset_roots.append(ds_path)
+        ds_path = Path(ds) if Path(ds).is_absolute() else REPO_ROOT / ds
+        if ds_path.exists():
+            dataset_roots.append(ds_path)
+        else:
+            print(f"WARNING: {ds_path} not found")
     
     if not dataset_roots:
-        parser.error("No valid datasets found")
+        parser.error("No valid datasets")
     
-    # Batch mode: build all pairs
-    if args.all_pairs:
+    # Batch triplet mode
+    if args.all_triplets:
         if not args.output_dir:
-            parser.error("--output-dir is required with --all-pairs")
-        
-        output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        print("=" * 60)
-        print("BATCH MODE: Building mixes for ALL string pairs")
-        print("=" * 60)
-        
-        results = {}
-        for pair_name, (string_a, string_b) in STRING_PAIRS.items():
-            print(f"\n{'='*60}")
-            print(f"Building {pair_name} mix...")
-            print("=" * 60)
-            
-            output_csv = output_dir / f"disambig_{pair_name.lower()}_mix.csv"
-            
+            parser.error("--output-dir required with --all-triplets")
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print("="*60 + "\nBuilding ALL triplet mixes\n" + "="*60)
+        for name, (sa, sb, sc) in STRING_TRIPLETS.items():
+            print(f"\n--- {name} ---")
             try:
-                stats = build_disambig_mix(
-                    dataset_roots=dataset_roots,
-                    string_a=string_a,
-                    string_b=string_b,
-                    output_csv=output_csv,
-                    max_fret=args.max_fret,
-                    val_split=args.val_split,
-                    seed=args.seed,
-                )
-                results[pair_name] = {'status': 'success', 'stats': stats, 'path': output_csv}
+                build_triplet_mix(dataset_roots, sa, sb, sc, out_dir / f"disambig_{name.lower()}_mix.csv",
+                                  args.max_fret, args.val_split, args.seed)
             except Exception as e:
-                print(f"  ERROR: {e}")
-                results[pair_name] = {'status': 'error', 'error': str(e)}
-        
-        # Summary
-        print("\n" + "=" * 60)
-        print("BATCH SUMMARY")
-        print("=" * 60)
-        for pair_name, result in results.items():
-            if result['status'] == 'success':
-                stats = result['stats']
-                print(f"  {pair_name}: {stats['total']} samples ({stats['train']} train, {stats['val']} val)")
-            else:
-                print(f"  {pair_name}: FAILED - {result['error']}")
-        
-        print(f"\nOutputs written to: {output_dir}")
+                print(f"ERROR: {e}")
         return
     
-    # Single pair mode
-    if not args.pair:
-        parser.error("--pair is required (or use --all-pairs for batch mode)")
-    if not args.output:
-        parser.error("--output is required")
+    # Batch pair mode
+    if args.all_pairs:
+        if not args.output_dir:
+            parser.error("--output-dir required with --all-pairs")
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print("="*60 + "\nBuilding ALL pair mixes\n" + "="*60)
+        for name, (sa, sb) in STRING_PAIRS.items():
+            print(f"\n--- {name} ---")
+            try:
+                build_pair_mix(dataset_roots, sa, sb, out_dir / f"disambig_{name.lower()}_mix.csv",
+                               args.max_fret, args.val_split, args.seed)
+            except Exception as e:
+                print(f"ERROR: {e}")
+        return
     
-    string_a, string_b = STRING_PAIRS[args.pair]
+    # Single triplet
+    if args.triplet:
+        if not args.output:
+            parser.error("--output required with --triplet")
+        sa, sb, sc = STRING_TRIPLETS[args.triplet]
+        build_triplet_mix(dataset_roots, sa, sb, sc, Path(args.output), args.max_fret, args.val_split, args.seed)
+        return
     
-    build_disambig_mix(
-        dataset_roots=dataset_roots,
-        string_a=string_a,
-        string_b=string_b,
-        output_csv=Path(args.output),
-        max_fret=args.max_fret,
-        val_split=args.val_split,
-        seed=args.seed,
-    )
+    # Single pair
+    if args.pair:
+        if not args.output:
+            parser.error("--output required with --pair")
+        sa, sb = STRING_PAIRS[args.pair]
+        build_pair_mix(dataset_roots, sa, sb, Path(args.output), args.max_fret, args.val_split, args.seed)
+        return
+    
+    parser.error("Specify --triplet, --all-triplets, --pair, or --all-pairs")
 
 
 if __name__ == '__main__':

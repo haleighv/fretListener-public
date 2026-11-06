@@ -276,17 +276,39 @@ class TrainGUI(tk.Tk):
     def _build_disambig_mix_params(self) -> None:
         self.disambig_mix_frame = ttk.Frame(self.mix_frame)
         row = 0
-        ttk.Label(self.disambig_mix_frame, text="Output directory").grid(row=row, column=0, sticky="w")
+        
+        # Disambig type selection
+        ttk.Label(self.disambig_mix_frame, text="Disambig type").grid(row=row, column=0, sticky="w")
+        type_frame = ttk.Frame(self.disambig_mix_frame)
+        type_frame.grid(row=row, column=1, sticky="w", padx=(8, 0))
+        self.disambig_type_var = tk.StringVar(value="triplet")
+        ttk.Radiobutton(type_frame, text="Triplet (3-way, recommended)", 
+                       variable=self.disambig_type_var, value="triplet",
+                       command=self._on_disambig_type_change).pack(side="left")
+        ttk.Radiobutton(type_frame, text="Pair (2-way, legacy)", 
+                       variable=self.disambig_type_var, value="pair",
+                       command=self._on_disambig_type_change).pack(side="left", padx=(16, 0))
+        row += 1
+        
+        ttk.Label(self.disambig_mix_frame, text="Output directory").grid(row=row, column=0, sticky="w", pady=(8, 0))
         out_row = ttk.Frame(self.disambig_mix_frame)
-        out_row.grid(row=row, column=1, sticky="w", padx=(8, 0))
+        out_row.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
         ttk.Entry(out_row, textvariable=self.disambig_output_dir_var, width=40).pack(side="left")
         ttk.Button(out_row, text="Browse…", command=self._browse_disambig_output_dir).pack(side="left", padx=(8, 0))
         row += 1
         ttk.Label(self.disambig_mix_frame, text="Seed").grid(row=row, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(self.disambig_mix_frame, textvariable=self.mix_seed_var, width=24).grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
         row += 1
-        info = ttk.Label(self.disambig_mix_frame, text="Builds mixes for ALL 5 string pairs:\nE/A, A/D, D/G, G/B, B/e", foreground=FG_DIM)
-        info.grid(row=row, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self.disambig_info_var = tk.StringVar(value="Builds mixes for ALL 4 string triplets:\nE/A/D, A/D/G, D/G/B, G/B/e")
+        self.disambig_info_label = ttk.Label(self.disambig_mix_frame, textvariable=self.disambig_info_var, foreground=FG_DIM)
+        self.disambig_info_label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(12, 0))
+
+    def _on_disambig_type_change(self) -> None:
+        dtype = self.disambig_type_var.get()
+        if dtype == "triplet":
+            self.disambig_info_var.set("Builds mixes for ALL 4 string triplets:\nE/A/D, A/D/G, D/G/B, G/B/e")
+        else:
+            self.disambig_info_var.set("Builds mixes for ALL 5 string pairs:\nE/A, A/D, D/G, G/B, B/e")
 
     def _build_training_params(self) -> None:
         # Shared params frame
@@ -468,12 +490,19 @@ class TrainGUI(tk.Tk):
     def _build_disambig_mix(self, datasets: list) -> None:
         script = _project_root() / "tools" / "build_disambig_mix.py"
         output_dir = self.disambig_output_dir_var.get()
+        dtype = self.disambig_type_var.get()
 
-        cmd = [_python_exec(), str(script), "--all-pairs", "--output-dir", output_dir,
-               "--seed", self.mix_seed_var.get(), "--datasets"] + datasets
-
-        self._log(f"Running: {' '.join(cmd)}")
-        self.status_var.set("Building disambig mixes...")
+        if dtype == "triplet":
+            cmd = [_python_exec(), str(script), "--all-triplets", "--output-dir", output_dir,
+                   "--seed", self.mix_seed_var.get(), "--datasets"] + datasets
+            self._log(f"Running: {' '.join(cmd)}")
+            self.status_var.set("Building triplet disambig mixes...")
+        else:
+            cmd = [_python_exec(), str(script), "--all-pairs", "--output-dir", output_dir,
+                   "--seed", self.mix_seed_var.get(), "--datasets"] + datasets
+            self._log(f"Running: {' '.join(cmd)}")
+            self.status_var.set("Building pair disambig mixes...")
+        
         self._run_subprocess(cmd)
 
     def _start_training(self) -> None:
@@ -524,18 +553,19 @@ class TrainGUI(tk.Tk):
         self._run_subprocess(cmd)
 
     def _train_disambig(self) -> None:
-        script = _project_root() / "tools" / "train_disambiguator.py"
+        script = _project_root() / "src" / "train_disambiguator.py"
         mix_dir = self.disambig_output_dir_var.get()
+        dtype = self.disambig_type_var.get()
 
         cmd = [_python_exec(), str(script), "--batch", "--mix-dir", mix_dir,
                "--batch-size", self.batch_size_var.get(),
                "--epochs", self.disambig_epochs_var.get(),
                "--patience", self.disambig_patience_var.get(),
                "--lr", self.lr_var.get(),
-               "--seed", self.train_seed_var.get()]
+               "--type", dtype]
 
         self._log(f"Running: {' '.join(cmd)}")
-        self.status_var.set("Training disambiguators (batch)...")
+        self.status_var.set(f"Training {dtype} disambiguators (batch)...")
         self._run_subprocess(cmd)
 
     def _run_subprocess(self, cmd: list) -> None:

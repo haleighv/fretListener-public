@@ -1,5 +1,22 @@
-.DS_Store
-tools/datacollection/processed_dataset/*
-tools/datacollection/raw_daw_recordings/*.wav
-__pycache__/c
+# Private data and generated artifacts (never commit)
+data/
+*.wav
+*.flac
+*.npy
+*.pt
+*.pth
+*.onnx
+
+# Builds
+build/
+dist/
+*.app/
+*.zip
+tools/datacollection/processed_dataset/
+tools/datacollection/raw_daw_recordings/
+
+# Python / OS
+__pycache__/
 *.pyc
+.DS_Store
+.venv/

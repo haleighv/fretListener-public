@@ -1,0 +1,59 @@
+{
+  "note": "Summary statistics only. Audio is not published.",
+  "datasets": [
+    {
+      "dataset": "strat_neck_119",
+      "clips": 5712,
+      "strings": 6,
+      "fret_min": 0,
+      "fret_max": 7,
+      "minutes": 57.1,
+      "sample_rate": 16000
+    },
+    {
+      "dataset": "strat_neck_40",
+      "clips": 1920,
+      "strings": 6,
+      "fret_min": 0,
+      "fret_max": 7,
+      "minutes": 19.2,
+      "sample_rate": 16000
+    },
+    {
+      "dataset": "strat_mia_full_bridge_20",
+      "clips": 1560,
+      "strings": 6,
+      "fret_min": 0,
+      "fret_max": 12,
+      "minutes": 15.6,
+      "sample_rate": 48000
+    },
+    {
+      "dataset": "strat_mij_full_neck_20",
+      "clips": 1560,
+      "strings": 6,
+      "fret_min": 0,
+      "fret_max": 12,
+      "minutes": 15.6,
+      "sample_rate": 48000
+    },
+    {
+      "dataset": "rg550_neck_20",
+      "clips": 960,
+      "strings": 6,
+      "fret_min": 0,
+      "fret_max": 7,
+      "minutes": 9.6,
+      "sample_rate": 16000
+    },
+    {
+      "dataset": "strat_1_bridge_10",
+      "clips": 480,
+      "strings": 6,
+      "fret_min": 0,
+      "fret_max": 7,
+      "minutes": 4.8,
+      "sample_rate": 48000
+    }
+  ]
+}

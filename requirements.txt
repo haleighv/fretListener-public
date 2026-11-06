@@ -1,0 +1,9 @@
+numpy
+scipy
+librosa
+soundfile
+sounddevice
+torch>=2.2
+torchaudio>=2.2
+matplotlib
+# tkinter ships with most Python installs (macOS: python.org installer or `brew install python-tk`)

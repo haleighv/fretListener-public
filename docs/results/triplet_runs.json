@@ -1,0 +1,109 @@
+{
+  "note": "Triplet disambiguator results (metrics only). Training clips are not published.",
+  "runs": {
+    "20251223_222405": {
+      "E_A_D": {
+        "best_val_acc": 0.7962962962962963,
+        "best_epoch": 20,
+        "n_val": 54,
+        "n_train": 306
+      },
+      "A_D_G": {
+        "best_val_acc": 0.9259259259259259,
+        "best_epoch": 25,
+        "n_val": 54,
+        "n_train": 306
+      },
+      "D_G_B": {
+        "best_val_acc": 0.7083333333333334,
+        "best_epoch": 10,
+        "n_val": 72,
+        "n_train": 408
+      },
+      "G_B_e": {
+        "best_val_acc": 0.8472222222222222,
+        "best_epoch": 27,
+        "n_val": 72,
+        "n_train": 408
+      }
+    },
+    "20251223_222529": {
+      "E_A_D": {
+        "best_val_acc": 0.7962962962962963,
+        "best_epoch": 11,
+        "n_val": 54,
+        "n_train": 306
+      },
+      "A_D_G": {
+        "best_val_acc": 0.9444444444444444,
+        "best_epoch": 42,
+        "n_val": 54,
+        "n_train": 306
+      },
+      "D_G_B": {
+        "best_val_acc": 0.8333333333333334,
+        "best_epoch": 33,
+        "n_val": 72,
+        "n_train": 408
+      },
+      "G_B_e": {
+        "best_val_acc": 0.9444444444444444,
+        "best_epoch": 41,
+        "n_val": 72,
+        "n_train": 408
+      }
+    },
+    "20251223_222859": {
+      "E_A_D": {
+        "best_val_acc": 1.0,
+        "best_epoch": 22,
+        "n_val": 54,
+        "n_train": 306
+      },
+      "A_D_G": {
+        "best_val_acc": 0.9074074074074074,
+        "best_epoch": 16,
+        "n_val": 54,
+        "n_train": 306
+      },
+      "D_G_B": {
+        "best_val_acc": 0.8888888888888888,
+        "best_epoch": 35,
+        "n_val": 72,
+        "n_train": 408
+      },
+      "G_B_e": {
+        "best_val_acc": 0.9722222222222222,
+        "best_epoch": 23,
+        "n_val": 72,
+        "n_train": 408
+      }
+    },
+    "20251226_203604": {
+      "E_A_D": {
+        "best_val_acc": 0.7962962962962963,
+        "best_epoch": 41,
+        "n_val": 54,
+        "n_train": 306
+      },
+      "A_D_G": {
+        "best_val_acc": 0.9074074074074074,
+        "best_epoch": 26,
+        "n_val": 54,
+        "n_train": 306
+      },
+      "D_G_B": {
+        "best_val_acc": 0.8055555555555556,
+        "best_epoch": 28,
+        "n_val": 72,
+        "n_train": 408
+      },
+      "G_B_e": {
+        "best_val_acc": 0.8611111111111112,
+        "best_epoch": 46,
+        "n_val": 72,
+        "n_train": 408
+      }
+    }
+  }
+}

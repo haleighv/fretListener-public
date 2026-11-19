@@ -6,6 +6,10 @@ Knowing the pitch isn't enough to place a note on the neck: the same E4 can be p
 
 Everything is built from scratch: a custom data-collection tool, a self-recorded dataset, the training pipeline, and two realtime GUI apps (a live fretboard listener and a practice trainer).
 
+![fretListener placing D3 on the low E string, 10th fret](docs/screenshots/fretlistener-live-note-detection.png)
+
+*A held-out validation clip played through the live inference path. The note model hears D3; the E/A/D disambiguator places it on the low E string at fret 10 (0.97 confidence) rather than the open D string. Reproduce with `tools/demo_playback.py`.*
+
 ## Highlights
 
 - **12,192 hand-recorded, labeled single-note clips** (~2 hours across 6 guitar/pickup datasets), captured with a purpose-built recording tool
@@ -86,6 +90,20 @@ Summary statistics are in [`docs/results/datasets.json`](docs/results/datasets.j
 
 The full development story is in **[docs/DEVLOG.md](docs/DEVLOG.md)**.
 
+## Apps
+
+**FretTrainer** (`src/fretTrainer.py`): a practice tool for scales, arpeggios, octaves and intervals. It highlights the target notes on the neck and checks what you play in real time.
+
+![FretTrainer running a C major scale exercise](docs/screenshots/frettrainer-c-major-scale-practice.png)
+
+**Data collection** (`tools/data_collection.py`): walks you through every string and fret, records continuous takes, and slices them into labeled clips with metadata. Every clip in the dataset was recorded with this tool.
+
+![Data collection tool ready to record the open low E string](docs/screenshots/data-collection-session-setup.png)
+
+**Training GUI** (`tools/train_gui.py`): pick datasets, build a balanced training mix, and launch note, string or disambiguator training from one window.
+
+![Training GUI after building a 12,192-clip training mix](docs/screenshots/train-gui-building-training-mix.png)
+
 ## Repository layout
 
 ```
@@ -100,7 +118,9 @@ docs/        dev log, figures, and the script that regenerates them
 ## Quickstart
 
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+# macOS + Homebrew Python: Tk is a separate package, e.g. brew install python-tk@3.15
 
 # 1. Record a dataset (GUI)
 python tools/data_collection.py
@@ -120,6 +140,8 @@ python src/fretListener.py
 ```
 
 You can also do steps 2–4 in one place with `python tools/train_gui.py`. `python src/fretTrainer.py` opens a scale and arpeggio practice tool that checks what you play in real time.
+
+To try the listener without a guitar, `tools/demo_playback.py` feeds recorded clips through the same inference path and prints each prediction next to the true string and fret.
 
 Regenerate the figures with `python docs/make_figures.py`.
 

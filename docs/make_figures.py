@@ -70,7 +70,7 @@ def fig_generalization(t, name):
         ax.text(a + 0.15, y, f"{a:.1f}%  (n={val_n(run):,})", va="center", fontsize=9.5, color=t["text"])
     ax.set_yticks(ys, [r[0] for r in rows], color=t["text"])
     ax.set_xlim(85, 100)
-    ax.set_xlabel("Validation accuracy (%)  — axis starts at 85%", color=t["text2"], fontsize=9.5)
+    ax.set_xlabel("Validation accuracy (%), axis starts at 85%", color=t["text2"], fontsize=9.5)
     h1 = plt.Rectangle((0, 0), 1, 1, color=t["s1"]); h2 = plt.Rectangle((0, 0), 1, 1, color=t["s2"])
     leg = ax.legend([h1, h2], ["Same guitars in train and val", "Val guitar unseen in training"],
                     loc="lower left", bbox_to_anchor=(-0.02, 1.0), ncol=2, frameon=False, fontsize=9.5)
